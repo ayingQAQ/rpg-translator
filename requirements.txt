@@ -1,0 +1,15 @@
+# GUI dependencies
+PyQt5>=5.15.0
+
+# Game text extraction
+jsonpath-ng>=1.5.2  # JSON path queries
+html-parser>=0.0.4  # HTML parsing
+
+# Existing dependencies
+python-dotenv>=1.0.0
+pyyaml>=6.0
+openpyxl>=3.1.0
+chardet>=5.2.0
+requests>=2.31.0
+deep-translator>=1.11.0
+tqdm>=4.66.0

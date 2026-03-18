@@ -1,0 +1,6 @@
+id,name,type,description,effect,value
+1,Health Potion,Consumable,"Restores 50 HP instantly",Restore HP,50
+2,Magic Sword,Weapon,"A legendary blade with ancient power",+50 ATK,1000
+3,Iron Shield,Armor,"Sturdy shield made by dwarven smiths",+20 DEF,300
+4,Mana Crystal,Consumable,"Restores 30 MP when crushed",Restore MP,80
+5,Phoenix Feather,Key Item,"Revives a fallen ally with 50% HP",Revive,9999
