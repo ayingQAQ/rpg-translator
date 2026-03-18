@@ -67,6 +67,7 @@ __all__ = [
     "XMLParser",
     "YAMLParser",
     "ExcelParser",
+    "TextSegment",
     "BinaryParser",
     "get_parser",
     "get_supported_formats",
