@@ -136,7 +136,7 @@ def extract_rpgmv_text(data_dir: Path, engine_info: Dict) -> List[Dict[str, Any]
                         'path': file_path,
                         'type': 'Data File',
                         'engine': 'rpgmv',
-                        'content': data
+                        'content': None
                     })
             except Exception as e:
                 print(f"Error reading {file_path}: {e}")
@@ -154,7 +154,7 @@ def extract_rpgmv_text(data_dir: Path, engine_info: Dict) -> List[Dict[str, Any]
                     'path': map_file,
                     'type': 'Map',
                     'engine': 'rpgmv',
-                    'content': map_data
+                    'content': None
                 })
         except Exception as e:
             print(f"Error reading map {map_file}: {e}")
@@ -194,7 +194,7 @@ def extract_generic_text(game_path: Path, engine_info: Dict) -> List[Dict[str, A
                             'path': file_path,
                             'type': 'JSON Data',
                             'engine': 'generic',
-                            'content': data
+                            'content': None
                         })
                 
                 elif ext == '*.csv':
@@ -207,19 +207,19 @@ def extract_generic_text(game_path: Path, engine_info: Dict) -> List[Dict[str, A
                                 'path': file_path,
                                 'type': 'CSV Data',
                                 'engine': 'generic',
-                                'content': rows
+                                'content': None
                             })
                 
                 elif ext == '*.txt':
                     encoding = detect_file_encoding(file_path)
                     with open(file_path, 'r', encoding=encoding) as f:
-                        content = f.read()
+                        content = f.read(100) # Only peek to see if not empty
                         if len(content.strip()) > 0:
                             extracted_files.append({
                                 'path': file_path,
                                 'type': 'Text File',
                                 'engine': 'generic',
-                                'content': content
+                                'content': None
                             })
             
             except Exception as e:
@@ -288,7 +288,7 @@ def extract_wolf_text(game_path: Path, engine_info: Dict) -> List[Dict[str, Any]
             try:
                 encoding = detect_file_encoding(file_path)
                 with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
-                    content = f.read()
+                    content = f.read(100) # Only peek
                     if content.strip():
                         # Wolf files are often binary or custom format
                         # Try to extract text strings
@@ -296,7 +296,7 @@ def extract_wolf_text(game_path: Path, engine_info: Dict) -> List[Dict[str, Any]
                             'path': file_path,
                             'type': 'Wolf Data',
                             'engine': 'wolf',
-                            'content': content
+                            'content': None
                         })
             except Exception as e:
                 print(f"Error reading Wolf file {file_path}: {e}")
@@ -307,13 +307,13 @@ def extract_wolf_text(game_path: Path, engine_info: Dict) -> List[Dict[str, Any]
         try:
             encoding = detect_file_encoding(map_file)
             with open(map_file, 'r', encoding=encoding, errors='ignore') as f:
-                content = f.read()
+                content = f.read(100)
                 if content.strip():
                     extracted_files.append({
                         'path': map_file,
                         'type': 'Wolf Map',
                         'engine': 'wolf',
-                        'content': content
+                        'content': None
                     })
         except Exception as e:
             print(f"Error reading Wolf map {map_file}: {e}")
@@ -338,14 +338,14 @@ def extract_renpy_text(game_path: Path, engine_info: Dict) -> List[Dict[str, Any
         try:
             encoding = detect_file_encoding(rpy_file)
             with open(rpy_file, 'r', encoding=encoding, errors='ignore') as f:
-                content = f.read()
+                content = f.read(100)
                 
                 if content.strip():
                     extracted_files.append({
                         'path': rpy_file,
                         'type': 'Ren\'Py Script',
                         'engine': 'renpy',
-                        'content': content
+                        'content': None
                     })
         except Exception as e:
             print(f"Error reading Ren'Py file {rpy_file}: {e}")
@@ -358,13 +358,13 @@ def extract_renpy_text(game_path: Path, engine_info: Dict) -> List[Dict[str, Any
             try:
                 encoding = detect_file_encoding(file_path)
                 with open(file_path, 'r', encoding=encoding) as f:
-                    content = f.read()
+                    content = f.read(100)
                     if content.strip():
                         extracted_files.append({
                             'path': file_path,
                             'type': 'Ren\'Py Data',
                             'engine': 'renpy',
-                            'content': content
+                            'content': None
                         })
             except Exception as e:
                 print(f"Error reading Ren'Py data file {file_path}: {e}")

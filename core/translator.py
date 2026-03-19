@@ -452,14 +452,24 @@ class GameTranslator:
         extensions: List[str],
         recursive: bool
     ) -> List[str]:
-        """Find all files with specified extensions."""
+        """Find all files with specified extensions with basic safety filtering."""
         files = []
+        skip_dirs = {'img', 'images', 'graphics', 'audio', 'sound', 'music', 'movies', 'video', 'save', 'saves'}
         
         for root, dirs, filenames in os.walk(directory):
+            # Modify dirs in-place to skip irrelevant directories early
+            dirs[:] = [d for d in dirs if d.lower() not in skip_dirs]
+            
             for filename in filenames:
                 ext = os.path.splitext(filename)[1].lower()
                 if ext in extensions:
-                    files.append(os.path.join(root, filename))
+                    file_path = os.path.join(root, filename)
+                    try:
+                        # Skip files that are > 10MB to avoid parsing huge assets
+                        if os.path.getsize(file_path) <= 10 * 1024 * 1024:
+                            files.append(file_path)
+                    except OSError:
+                        pass
             
             if not recursive:
                 break

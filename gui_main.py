@@ -851,6 +851,15 @@ class MainWindow(QMainWindow):
         if success:
             self.log(f"Translation completed: {message}")
             QMessageBox.information(self, "Success", message)
+            
+            # Reload current file to show new translations
+            if self.current_file:
+                for i in range(self.files_list.count()):
+                    item = self.files_list.item(i)
+                    file_info = item.data(Qt.UserRole)
+                    if file_info and file_info['path'] == self.current_file:
+                        self.load_file_for_translation(item)
+                        break
         else:
             self.log_error(f"Translation failed: {message}")
             QMessageBox.critical(self, "Error", message)
