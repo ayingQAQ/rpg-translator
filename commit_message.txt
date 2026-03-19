@@ -1,0 +1,20 @@
+Initial commit: RPG Game Translator v1.0
+
+A complete RPG game translation tool with the following features:
+- Visual GUI interface (PyQt5) for easy operation
+- Support for multiple RPG engines (RPG Maker MV/MZ, VX Ace, Wolf, Unity, Ren'Py)
+- Multi-format file parsers (JSON, CSV, XML, YAML, Excel, Binary)
+- Multiple translation engines (Google, DeepL, Baidu, Local AI)
+- Batch processing and auto-backup functionality
+- Tested on real RPG Maker MV games
+
+Core modules:
+- gui_main.py: Main GUI application
+- game_extractors.py: Game text extraction engine
+- core/translator.py: Main translation coordinator
+- parsers/: File format parsers
+- translators/: Translation engine implementations
+
+Documentation:
+- README.md: Complete user guide
+- Project documentation in Chinese

@@ -6,17 +6,18 @@ import os
 import sys
 import json
 import time
+import concurrent.futures
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
 # Handle imports for both package and direct execution
 try:
-    from ..parsers import get_parser, BaseParser
+    from ..parsers import get_parser, BaseParser, TextSegment, get_supported_formats
     from ..translators import get_translator, BaseTranslator
 except ImportError:
     # Direct execution
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from parsers import get_parser, BaseParser
+    from parsers import get_parser, BaseParser, TextSegment, get_supported_formats
     from translators import get_translator, BaseTranslator
 
 
@@ -203,8 +204,6 @@ class GameTranslator:
         Returns:
             List of output file paths
         """
-        from ..parsers import get_supported_formats
-        
         # Use all supported formats if not specified
         if extensions is None:
             extensions = get_supported_formats()
@@ -244,7 +243,7 @@ class GameTranslator:
     
     def _translate_segments(self, segments: List) -> List[TextSegment]:
         """
-        Translate all text segments.
+        Translate all text segments using multi-threading for performance.
         
         Args:
             segments: List of TextSegment objects
@@ -253,53 +252,43 @@ class GameTranslator:
             List of TextSegment objects with translated_text populated
         """
         from tqdm import tqdm
+        import threading
         
         translated = []
         failed = []
         total = len(segments)
+        completed = 0
         
-        # Create progress bar
-        use_pbar = not self.progress_callback
-        if use_pbar:
-            pbar = tqdm(
-                segments,
-                desc="Translating",
-                unit="texts",
-                ncols=80
-            )
-        else:
-            pbar = segments
+        # Thread-safe lock for updating shared variables
+        lock = threading.Lock()
         
-        for i, segment in enumerate(pbar):
-            # Update progress
-            if use_pbar:
-                pbar.set_description(f"Translating ({i+1}/{total})")
-            elif self.progress_callback:
-                should_continue = self.progress_callback(i + 1, total)
-                if not should_continue:
-                    print("Translation cancelled by user.")
-                    break
+        def process_segment(segment):
+            """Process a single segment (thread-safe)."""
+            nonlocal completed
             
             # Skip empty texts
             if not segment or not segment.text or not segment.text.strip():
                 segment.translated_text = segment.text
-                translated.append(segment)
-                continue
+                with lock:
+                    completed += 1
+                return segment, None
             
             # Check if should skip
             if self._should_skip(segment.text):
                 segment.translated_text = segment.text
-                self.stats['skipped_texts'] += 1
+                with lock:
+                    self.stats['skipped_texts'] += 1
+                    completed += 1
                 
-                self.translation_log.append({
-                    'original': segment.text,
-                    'translated': segment.text,
-                    'location': segment.location,
-                    'success': True,
-                    'status': 'skipped'
-                })
-                translated.append(segment)
-                continue
+                with lock:
+                    self.translation_log.append({
+                        'original': segment.text,
+                        'translated': segment.text,
+                        'location': segment.location,
+                        'success': True,
+                        'status': 'skipped'
+                    })
+                return segment, None
             
             # Preserve placeholders
             preserved_text, placeholder_map = self._preserve_placeholders(segment.text)
@@ -312,36 +301,93 @@ class GameTranslator:
                 translated_text = self._restore_placeholders(translated_text, placeholder_map)
                 
                 segment.translated_text = translated_text
-                self.stats['translated_texts'] += 1
+                with lock:
+                    self.stats['translated_texts'] += 1
+                    completed += 1
                 
                 # Log translation
-                self.translation_log.append({
-                    'original': segment.text,
-                    'translated': translated_text,
-                    'location': segment.location,
-                    'success': True,
-                    'status': 'translated'
-                })
+                with lock:
+                    self.translation_log.append({
+                        'original': segment.text,
+                        'translated': translated_text,
+                        'location': segment.location,
+                        'success': True,
+                        'status': 'translated'
+                    })
+                
+                return segment, None
                 
             except Exception as e:
                 segment.translated_text = segment.text
-                self.stats['failed_texts'] += 1
-                failed.append((segment.text, str(e)))
+                with lock:
+                    self.stats['failed_texts'] += 1
+                    completed += 1
                 
                 # Log failure
-                self.translation_log.append({
-                    'original': segment.text,
-                    'translated': segment.text,
-                    'location': segment.location,
-                    'success': False,
-                    'error': str(e),
-                    'status': 'failed'
-                })
+                with lock:
+                    self.translation_log.append({
+                        'original': segment.text,
+                        'translated': segment.text,
+                        'location': segment.location,
+                        'success': False,
+                        'error': str(e),
+                        'status': 'failed'
+                    })
+                
+                return segment, str(e)
+        
+        # 🚀 使用线程池，同时发起多个翻译请求
+        # 免费 Google 接口开太大容易被封 IP，5-10 比较安全
+        # 如果是付费API如DeepL可以开到20-50
+        max_workers = 10
+        
+        # Create progress display (优雅降级处理)
+        use_pbar = not self.progress_callback
+        pbar = None
+        if use_pbar:
+            try:
+                from tqdm import tqdm
+                pbar = tqdm(
+                    total=total,
+                    desc="Translating",
+                    unit="texts",
+                    ncols=80
+                )
+            except ImportError:
+                print("\n[提示] 未检测到 tqdm 库，终端进度条已隐藏。如需显示请执行: pip install tqdm")
+                use_pbar = False
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务
+            future_to_segment = {executor.submit(process_segment, seg): seg for seg in segments}
             
-            translated.append(segment)
-            
-            # Rate limiting
-            time.sleep(self.delay)
+            # 处理完成的任务
+            for future in concurrent.futures.as_completed(future_to_segment):
+                segment, err = future.result()
+                translated.append(segment)
+                
+                # Update progress
+                if use_pbar:
+                    pbar.update(1)
+                    pbar.set_description(f"Translating ({completed}/{total})")
+                elif self.progress_callback:
+                    with lock:
+                        current_completed = completed
+                    should_continue = self.progress_callback(current_completed, total)
+                    if not should_continue:
+                        print("Translation cancelled by user.")
+                        # Cancel remaining futures
+                        for f in future_to_segment:
+                            f.cancel()
+                        break
+                
+                # Collect failed translations
+                if err:
+                    failed.append((segment.text, err))
+        
+      # 直接把多余的嵌套 if 去掉，并保持正确的缩进
+        if use_pbar and pbar:  # 防止 pbar 未定义时报错
+            pbar.close()
         
         # Report failures
         if failed:

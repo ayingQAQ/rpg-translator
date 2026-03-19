@@ -5,7 +5,7 @@ File Format Parsers
 Support for various game text file formats.
 """
 
-from .base_parser import BaseParser
+from .base_parser import BaseParser, TextSegment
 from .json_parser import JSONParser
 from .csv_parser import CSVParser
 from .xml_parser import XMLParser
@@ -62,6 +62,7 @@ def get_supported_formats() -> list:
 
 __all__ = [
     "BaseParser",
+    "TextSegment",
     "JSONParser",
     "CSVParser",
     "XMLParser",

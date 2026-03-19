@@ -27,6 +27,8 @@ except ImportError:
 
 import json
 import time
+import shutil
+import re
 from typing import List, Dict, Any, Optional
 import threading
 
@@ -92,6 +94,119 @@ class TranslationThread(QThread):
     def stop(self):
         """Request thread to stop."""
         self._stop_requested = True
+
+
+class OneClickTranslateThread(QThread):
+    """一键汉化后台线程"""
+    progress = pyqtSignal(int, int)  # current, total
+    log_message = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)  # success, message
+    error = pyqtSignal(str)
+    
+    def __init__(self, game_path, engine, source_lang, target_lang, delay=0.1):
+        super().__init__()
+        self.game_path = game_path
+        self.engine = engine
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+        self.delay = delay
+        self.translator = None
+        self._stop_requested = False
+    
+    def run(self):
+        """Run one-click translation in background."""
+        try:
+            self.log_message.emit("🚀 开始一键汉化工作流...")
+            
+            # 1. 初始化核心翻译器
+            self.translator = GameTranslator(
+                engine=self.engine,
+                source_lang=self.source_lang,
+                target_lang=self.target_lang,
+                delay=self.delay  # 因为有多线程了，可以把延迟调低
+            )
+            
+            # Set up callbacks
+            def progress_callback(current, total):
+                self.progress.emit(current, total)
+                return not self._stop_requested
+            
+            def log_callback(message):
+                self.log_message.emit(message)
+            
+            self.translator.set_progress_callback(progress_callback)
+            self.translator.set_log_callback(log_callback)
+            
+            # 2. 直接调用 translate_directory 翻译整个文件夹
+            # 它会自动扫描、解析、翻译、并保存覆盖（会生成backup）
+            output_paths = self.translator.translate_directory(
+                input_dir=str(self.game_path),
+                output_dir=str(self.game_path),  # 直接覆盖到原目录，实现真·一键汉化
+                recursive=True
+            )
+            
+            if self._stop_requested:
+                self.finished.emit(False, "🚫 汉化已取消")
+            else:
+                self.finished.emit(True, f"🎉 一键汉化完成！共处理 {len(output_paths)} 个文件。")
+                
+        except Exception as e:
+            self.error.emit(str(e))
+            self.finished.emit(False, f"❌ 一键汉化失败: {str(e)}")
+    
+    def stop(self):
+        """Request thread to stop."""
+        self._stop_requested = True
+        if self.translator:
+            # Cancel any ongoing translation
+            pass
+
+
+class RestoreThread(QThread):
+    """一键恢复后台线程"""
+    progress = pyqtSignal(int, int)
+    log_message = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+    
+    def __init__(self, game_path):
+        super().__init__()
+        self.game_path = Path(game_path)
+
+    def run(self):
+        try:
+            self.log_message.emit("⏪ 开始扫描备份文件...")
+            
+            # 查找所有包含 .backup 的文件
+            backup_files = []
+            for ext in ['*.json', '*.csv', '*.txt', '*.yaml', '*.xml', '*.rpy']:
+                for file in self.game_path.rglob(ext):
+                    if '.backup' in file.name:
+                        backup_files.append(file)
+            
+            if not backup_files:
+                self.finished.emit(False, "未在目录中找到任何备份文件。")
+                return
+
+            total = len(backup_files)
+            restored_count = 0
+            
+            for i, backup_path in enumerate(backup_files):
+                # 利用正则还原真实文件名
+                # 兼容 "name.backup.json" 和 "name.backup_123456.json" 两种命名方式
+                original_name = re.sub(r'\.backup(_\d+)?', '', backup_path.name)
+                original_path = backup_path.parent / original_name
+                
+                # 覆盖回原文件（保留备份文件作为后悔药）
+                shutil.copy2(backup_path, original_path)
+                self.log_message.emit(f"已恢复: {original_name}")
+                
+                restored_count += 1
+                self.progress.emit(i + 1, total)
+                
+            self.finished.emit(True, f"🎉 成功恢复了 {restored_count} 个原版文件！")
+            
+        except Exception as e:
+            self.finished.emit(False, f"❌ 恢复过程中出错: {str(e)}")
 
 
 class GameTextExtractorThread(QThread):
@@ -263,6 +378,23 @@ class MainWindow(QMainWindow):
         self.load_game_btn.clicked.connect(self.load_game_directory)
         project_layout.addWidget(self.load_game_btn)
         
+        # 一键汉化按钮
+        self.one_click_btn = QPushButton("🚀 一键汉化 (Mtool 模式)")
+        self.one_click_btn.setMinimumHeight(50)  # 做大一点
+        self.one_click_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; font-size: 14px;")
+        self.one_click_btn.clicked.connect(self.start_one_click_translation)
+        self.one_click_btn.setEnabled(False)  # 加载游戏后启用
+        project_layout.addWidget(self.one_click_btn)
+        
+        # 一键恢复按钮
+        self.restore_btn = QPushButton("⏪ 一键恢复 (还原原版)")
+        self.restore_btn.setMinimumHeight(40)
+        # 用醒目的红色/橙色警示这涉及到文件覆盖
+        self.restore_btn.setStyleSheet("background-color: #E53935; color: white; font-weight: bold; font-size: 14px;")
+        self.restore_btn.clicked.connect(self.start_restore)
+        self.restore_btn.setEnabled(False) 
+        project_layout.addWidget(self.restore_btn)
+        
         project_group.setLayout(project_layout)
         left_layout.addWidget(project_group)
         
@@ -428,6 +560,8 @@ class MainWindow(QMainWindow):
         has_text = len(self.text_data) > 0
         
         self.extract_text_btn.setEnabled(has_project)
+        self.one_click_btn.setEnabled(has_project)
+        self.restore_btn.setEnabled(has_project)
         self.translate_btn.setEnabled(has_text)
         self.translate_selected_btn.setEnabled(has_text)
     
@@ -491,6 +625,95 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", "Text extraction failed!")
         
         self.update_ui_state()
+    
+    def start_one_click_translation(self):
+        """触发一键汉化"""
+        if not self.game_path:
+            QMessageBox.warning(self, "Warning", "No game directory loaded!")
+            return
+            
+        reply = QMessageBox.question(self, '一键汉化', 
+                                     '此操作将自动扫描、翻译并替换游戏目录下的所有文本文件。\n（原文件会自动备份为 .backup 后缀）\n\n是否继续？',
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        
+        if reply == QMessageBox.No:
+            return
+
+        # 禁用界面
+        self.one_click_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        
+        engine = self.engine_combo.currentData()
+        source_lang = self.source_lang_combo.currentText()
+        target_lang = self.target_lang_combo.currentText()
+        
+        # 启动一键汉化线程
+        self.log("🚀 开始一键汉化...")
+        self.one_click_thread = OneClickTranslateThread(
+            self.game_path, engine, source_lang, target_lang
+        )
+        self.one_click_thread.progress.connect(self.update_progress)
+        self.one_click_thread.log_message.connect(self.log)
+        self.one_click_thread.finished.connect(self.one_click_finished)
+        self.one_click_thread.error.connect(self.log_error)
+        self.one_click_thread.start()
+    
+    def one_click_finished(self, success, message):
+        """一键汉化结束回调"""
+        self.one_click_thread = None
+        self.one_click_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        
+        if success:
+            QMessageBox.information(self, "汉化成功", message)
+            # 重新加载一遍文件列表，让用户看到翻译好的文件
+            self.extract_game_text()
+        else:
+            QMessageBox.critical(self, "汉化出错", message)
+    
+    def start_restore(self):
+        """触发一键恢复"""
+        if not self.game_path:
+            return
+            
+        reply = QMessageBox.warning(self, '警告: 一键恢复', 
+                                     '此操作将使用系统中的备份文件（.backup）覆盖现有的游戏文本。\n当前已翻译的内容将被还原为原版（或上一次备份的状态）。\n\n确定要继续吗？',
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        
+        if reply == QMessageBox.No:
+            return
+
+        # 禁用按钮，防止重复点击
+        self.restore_btn.setEnabled(False)
+        self.one_click_btn.setEnabled(False)
+            
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        
+        # 启动恢复线程
+        self.restore_thread = RestoreThread(self.game_path)
+        self.restore_thread.progress.connect(self.update_progress)
+        self.restore_thread.log_message.connect(self.log)
+        self.restore_thread.finished.connect(self.restore_finished)
+        self.restore_thread.start()
+
+    def restore_finished(self, success, message):
+        """恢复结束回调"""
+        self.restore_btn.setEnabled(True)
+        self.one_click_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        
+        if success:
+            QMessageBox.information(self, "恢复成功", message)
+            # 如果右侧正打开着某个文件，最好刷新一下或者清空，防止数据不一致
+            self.text_table.setRowCount(0)
+            self.file_label.setText("No file loaded")
+            self.text_data = []
+            self.current_file = None
+            self.update_ui_state()
+        else:
+            QMessageBox.warning(self, "恢复提示", message)
     
     def load_file_for_translation(self, item):
         """Load file for translation using Parser system."""

@@ -5,6 +5,7 @@ Base Translator - Abstract base class for translation engines
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Optional
 import time
+import threading
 
 
 class BaseTranslator(ABC):
@@ -35,6 +36,7 @@ class BaseTranslator(ABC):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self._last_request_time = 0
+        self._rate_limit_lock = threading.Lock()  # 新增这把限流锁
     
     @abstractmethod
     def translate(self, text: str) -> str:
@@ -103,10 +105,13 @@ class BaseTranslator(ABC):
         raise RuntimeError(f"Translation failed after {self.max_retries} attempts. Last error: {last_error}")
     
     def _wait_if_needed(self) -> None:
-        """Wait if necessary to respect rate limits."""
-        elapsed = time.time() - self._last_request_time
-        if elapsed < self.delay:
-            time.sleep(self.delay - elapsed)
+        """Wait if necessary to respect rate limits (Thread-Safe)."""
+        with self._rate_limit_lock:  # 每次只允许一个线程进入限流区
+            elapsed = time.time() - self._last_request_time
+            if elapsed < self.delay:
+                time.sleep(self.delay - elapsed)
+            # 必须在锁的内部更新最后请求时间
+            self._last_request_time = time.time()
     
     @staticmethod
     def get_supported_languages() -> List[str]:
