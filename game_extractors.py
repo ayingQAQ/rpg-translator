@@ -14,7 +14,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 # Add support for additional encodings
-import chardet
+import chardet # type: ignore
 
 
 def detect_file_encoding(file_path: Path) -> str:
@@ -399,6 +399,57 @@ def extract_game_text(game_path: Path, engine_info: Dict) -> List[Dict[str, Any]
         return extract_generic_text(data_dir, engine_info)
 
 
+def _extract_rpgm_commands(cmd_list: List[Dict[str, Any]], prefix: str, text_entries: Dict[str, str]):
+    """Helper to extract RPG Maker event commands."""
+    cmd_idx = 0
+    while cmd_idx < len(cmd_list):
+        command = cmd_list[cmd_idx]
+        if not command:
+            cmd_idx += 1
+            continue
+        
+        code = command.get('code')
+        
+        if code == 401:
+            # Text data - merge consecutive 401s
+            text_lines = []
+            start_cmd_idx = cmd_idx
+            
+            while cmd_idx < len(cmd_list):
+                cmd = cmd_list[cmd_idx] # type: ignore
+                if cmd and cmd.get('code') == 401:
+                    params = cmd.get('parameters', [])
+                    if params and len(params) > 0:
+                        text_lines.append(str(params[0]))
+                    else:
+                        text_lines.append("")
+                    cmd_idx += 1
+                else:
+                    break
+            
+            if text_lines:
+                key = f"{prefix}_cmd401_{start_cmd_idx}"
+                text_entries[key] = "\n".join(text_lines)
+            
+            continue # already incremented cmd_idx
+            
+        elif code == 102:
+            # Show Choices
+            params = command.get('parameters', [])
+            if params and len(params) > 0 and isinstance(params[0], list):
+                for choice_idx, choice_text in enumerate(params[0]):
+                    key = f"{prefix}_cmd102_{cmd_idx}_choice_{choice_idx}"
+                    text_entries[key] = str(choice_text)
+                    
+        elif code == 402:
+            # When [Choice]
+            params = command.get('parameters', [])
+            if params and len(params) > 1:
+                key = f"{prefix}_cmd402_{cmd_idx}_when_{params[0]}"
+                text_entries[key] = str(params[1])
+                
+        cmd_idx += 1
+
 def convert_to_translation_format(extracted_files: List[Dict]) -> Dict[Path, Dict]:
     """
     Convert extracted files to translation format.
@@ -420,32 +471,33 @@ def convert_to_translation_format(extracted_files: List[Dict]) -> Dict[Path, Dic
             text_entries = {}
             
             if 'Map' in file_info['type'] and isinstance(content, dict):
-                # Process map events - content is a dict with 'events' key
+                # Process map events
                 events = content.get('events', [])
                 for event_idx, event in enumerate(events):
-                    if event:
+                    if event and isinstance(event, dict):
                         for page_idx, page in enumerate(event.get('pages', [])):
-                            for cmd_idx, command in enumerate(page.get('list', [])):
-                                if command and command.get('code') in [101, 401]:  # Show Text
-                                    parameters = command.get('parameters', [])
-                                    if parameters and len(parameters) > 0:
-                                        key = f"event_{event_idx}_page_{page_idx}_cmd_{cmd_idx}"
-                                        text_entries[key] = parameters[0] if isinstance(parameters[0], str) else str(parameters[0])
+                            if isinstance(page, dict) and 'list' in page and isinstance(page['list'], list):
+                                prefix = f"events_{event_idx}_pages_{page_idx}_list"
+                                _extract_rpgm_commands(page['list'], prefix, text_entries)
+                                
             elif isinstance(content, list):
                 # Process database files - content is a list
                 for idx, entry in enumerate(content):
                     if isinstance(entry, dict):
                         # Extract common text fields
-                        if 'name' in entry and entry['name']:
-                            text_entries[f"{idx}_name"] = entry['name']
-                        if 'description' in entry and entry['description']:
-                            text_entries[f"{idx}_description"] = entry['description']
-                        if 'message1' in entry and entry['message1']:
-                            text_entries[f"{idx}_message1"] = entry['message1']
-                        if 'message2' in entry and entry['message2']:
-                            text_entries[f"{idx}_message2"] = entry['message2']
-                        if 'note' in entry and entry['note']:
-                            text_entries[f"{idx}_note"] = entry['note']
+                        for field in ['name', 'description', 'message1', 'message2', 'message3', 'message4', 'note', 'profile']:
+                            if field in entry and entry[field] and isinstance(entry[field], str):
+                                text_entries[f"{idx}_{field}"] = entry[field]
+                        
+                        # Extract commands if present (CommonEvents.json, Troops.json)
+                        if 'list' in entry and isinstance(entry['list'], list):
+                            prefix = f"{idx}_list"
+                            _extract_rpgm_commands(entry['list'], prefix, text_entries)
+                        elif 'pages' in entry and isinstance(entry['pages'], list):
+                            for page_idx, page in enumerate(entry['pages']):
+                                if isinstance(page, dict) and 'list' in page and isinstance(page['list'], list):
+                                    prefix = f"{idx}_pages_{page_idx}_list"
+                                    _extract_rpgm_commands(page['list'], prefix, text_entries)
             
             if text_entries:
                 translation_files[file_path] = text_entries
@@ -466,7 +518,7 @@ def convert_to_translation_format(extracted_files: List[Dict]) -> Dict[Path, Dic
                 # CSV format
                 text_entries = {}
                 headers = content[0] if content else []
-                for row_idx, row in enumerate(content[1:], 1):
+                for row_idx, row in enumerate(content[1:], 1): # type: ignore
                     for col_idx, cell in enumerate(row):
                         if isinstance(cell, str) and len(cell.strip()) > 0:
                             key = f"row_{row_idx}_col_{col_idx}"
@@ -502,7 +554,8 @@ def _apply_nested_translation(data: Any, path: str, translated_value: str):
     current = data
     
     # Navigate to the parent of the target
-    for part in parts[:-1]:
+    for i in range(len(parts) - 1):
+        part = parts[i]
         if part.isdigit():
             idx = int(part)
             if isinstance(current, list) and idx < len(current):
@@ -525,6 +578,91 @@ def _apply_nested_translation(data: Any, path: str, translated_value: str):
         if isinstance(current, dict):
             current[last_part] = translated_value
 
+def _apply_rpgm_command_translation(data: Any, path: str, translated_value: str):
+    """Apply translation specifically to RPG Maker command blocks."""
+    parts = path.split('_')
+    current = data
+    
+    # Navigate to the 'list' array
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part.startswith('cmd'):
+            break
+            
+        if part.isdigit():
+            idx = int(part)
+            if isinstance(current, list) and idx < len(current):
+                current = current[idx]
+            else:
+                return # Invalid path
+        else:
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return # Invalid path
+        i += 1
+        
+    if not isinstance(current, list):
+        return
+        
+    commands = current
+    cmd_type = parts[i] # e.g. "cmd401"
+    
+    if cmd_type == 'cmd401':
+        start_idx = int(parts[i+1])
+        if start_idx >= len(commands): return
+        
+        # We need to replace the 401 commands starting at start_idx with translated_value
+        translated_lines = translated_value.split('\n')
+        
+        # Find how many 401s there are currently
+        old_401_count = 0
+        idx = start_idx
+        while idx < len(commands):
+            cmd = commands[idx]
+            if cmd and cmd.get('code') == 401:
+                old_401_count += 1
+                idx += 1
+            else:
+                break
+                
+        new_401_count = len(translated_lines)
+        
+        # Modify existing 401s
+        for j in range(min(old_401_count, new_401_count)):
+            commands[start_idx + j]['parameters'][0] = translated_lines[j]
+            
+        if new_401_count > old_401_count:
+            # Insert additional 401s
+            for j in range(old_401_count, new_401_count):
+                new_cmd = {'code': 401, 'indent': commands[start_idx]['indent'], 'parameters': [translated_lines[j]]}
+                commands.insert(start_idx + j, new_cmd)
+        elif new_401_count < old_401_count:
+            # Delete excess 401s
+            for _ in range(old_401_count - new_401_count):
+                commands.pop(start_idx + new_401_count)
+                
+    elif cmd_type == 'cmd102':
+        cmd_idx = int(parts[i+1])
+        if len(parts) > i+3:
+            choice_idx = int(parts[i+3])
+            if cmd_idx < len(commands):
+                cmd = commands[cmd_idx]
+                if cmd and cmd.get('code') == 102:
+                    params = cmd.get('parameters', [])
+                    if params and len(params) > 0 and isinstance(params[0], list) and choice_idx < len(params[0]):
+                        params[0][choice_idx] = translated_value
+                        
+    elif cmd_type == 'cmd402':
+        cmd_idx = int(parts[i+1])
+        if cmd_idx < len(commands):
+            cmd = commands[cmd_idx]
+            if cmd and cmd.get('code') == 402:
+                params = cmd.get('parameters', [])
+                if params and len(params) > 1:
+                    params[1] = translated_value
+
 
 def save_translated_file(original_path: Path, translated_data: Dict, output_path: Optional[Path] = None):
     """
@@ -546,8 +684,13 @@ def save_translated_file(original_path: Path, translated_data: Dict, output_path
         original_data = json.load(f)
     
     # Apply translations
+    # Group RPG Maker command updates to process them out of array shifting order
+    rpgm_command_updates = []
+    
     for key, translated_value in translated_data.items():
-        if '_' in key and any(part.isdigit() for part in key.split('_')):
+        if "cmd401_" in key or "cmd102_" in key or "cmd402_" in key:
+            rpgm_command_updates.append((key, translated_value))
+        elif '_' in key and any(part.isdigit() for part in key.split('_')):
             # Complex nested path (e.g., "events_1_pages_0_list_1_parameters_0")
             _apply_nested_translation(original_data, key, translated_value)
         elif isinstance(original_data, list):
@@ -561,7 +704,20 @@ def save_translated_file(original_path: Path, translated_data: Dict, output_path
         elif isinstance(original_data, dict):
             # Simple key-value
             if key in original_data:
-                original_data[key] = translated_value
+                original_data[key] = translated_value # type: ignore
+                
+    # Sort RPGM updates by command index descending to avoid shifting issues when inserting/deleting items
+    def get_cmd_idx(path):
+        parts = path.split('_')
+        for i, part in enumerate(parts):
+            if part.startswith('cmd'):
+                return int(parts[i+1])
+        return 0
+
+    rpgm_command_updates.sort(key=lambda x: get_cmd_idx(x[0]), reverse=True)
+    
+    for key, translated_value in rpgm_command_updates:
+        _apply_rpgm_command_translation(original_data, key, translated_value)
     
     # Save with backup
     backup_path = original_path.with_suffix(f".backup_{int(time.time())}.json")

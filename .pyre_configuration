@@ -1,0 +1,11 @@
+{
+  "source_directories": [
+    "."
+  ],
+  "search_path": [
+    "."
+  ],
+  "exclude": [
+    ".*/__pycache__/.*"
+  ]
+}
