@@ -252,7 +252,9 @@ def is_text_data_file(data: Any) -> bool:
     
     elif isinstance(data, list) and len(data) > 0:
         # Check first few items
-        for item in data[:5]:
+        for i, item in enumerate(data):
+            if i >= 5:
+                break
             if isinstance(item, dict):
                 for key in item.keys():
                     if isinstance(key, str) and any(pattern in key.lower() for pattern in text_patterns):

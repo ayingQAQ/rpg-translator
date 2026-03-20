@@ -7,18 +7,18 @@ import sys
 import json
 import time
 import concurrent.futures
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Callable
 from datetime import datetime
 
 # Handle imports for both package and direct execution
 try:
-    from ..parsers import get_parser, BaseParser, TextSegment, get_supported_formats
-    from ..translators import get_translator, BaseTranslator
+    from ..parsers import get_parser, BaseParser, TextSegment, get_supported_formats  # type: ignore
+    from ..translators import get_translator, BaseTranslator  # type: ignore
 except ImportError:
     # Direct execution
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from parsers import get_parser, BaseParser, TextSegment, get_supported_formats
-    from translators import get_translator, BaseTranslator
+    from parsers import get_parser, BaseParser, TextSegment, get_supported_formats  # type: ignore
+    from translators import get_translator, BaseTranslator  # type: ignore
 
 
 class GameTranslator:
@@ -37,7 +37,7 @@ class GameTranslator:
         engine: str = 'google',
         source_lang: str = 'auto',
         target_lang: str = 'zh-CN',
-        config: Dict = None,
+        config: Optional[Dict] = None,
         **kwargs
     ):
         """
@@ -56,10 +56,10 @@ class GameTranslator:
         self.target_lang = target_lang
         
         # Translation settings
-        self.batch_size = kwargs.get('batch_size', 50)
-        self.delay = kwargs.get('delay', 0.5)
-        self.preserve_patterns = kwargs.get('preserve_patterns', [])
-        self.skip_patterns = kwargs.get('skip_patterns', [])
+        self.batch_size: int = kwargs.get('batch_size', 50)
+        self.delay: float = kwargs.get('delay', 0.5)
+        self.preserve_patterns: List[str] = list(kwargs.get('preserve_patterns', []))
+        self.skip_patterns: List[str] = list(kwargs.get('skip_patterns', []))
         
         # Output settings
         self.output_dir = kwargs.get('output_dir', './output')
@@ -75,7 +75,7 @@ class GameTranslator:
         )
         
         # Translation statistics
-        self.stats = {
+        self.stats: Dict[str, Any] = {
             'total_texts': 0,
             'translated_texts': 0,
             'skipped_texts': 0,
@@ -88,9 +88,10 @@ class GameTranslator:
         self.translation_log = []
         
         # Progress callback
-        self.progress_callback = None
+        self.progress_callback: Optional[Callable[[int, int], bool]] = None
+        self.log_callback: Optional[Callable[[str], None]] = None
     
-    def set_progress_callback(self, callback):
+    def set_progress_callback(self, callback: Callable[[int, int], bool]):
         """
         Set progress callback for GUI updates.
         
@@ -99,7 +100,7 @@ class GameTranslator:
         """
         self.progress_callback = callback
     
-    def set_log_callback(self, callback):
+    def set_log_callback(self, callback: Callable[[str], None]):
         """
         Set log callback for GUI log updates.
         
@@ -110,15 +111,16 @@ class GameTranslator:
     
     def _log(self, message: str):
         """Log message with callback."""
-        if hasattr(self, 'log_callback') and self.log_callback:
-            self.log_callback(message)
+        cb = self.log_callback
+        if cb:
+            cb(message)
         # Always print to console for debugging
         print(message)
     
     def translate_file(
         self,
         input_path: str,
-        output_path: str = None,
+        output_path: Optional[str] = None,
         **parser_kwargs
     ) -> str:
         """
@@ -186,8 +188,8 @@ class GameTranslator:
     def translate_directory(
         self,
         input_dir: str,
-        output_dir: str = None,
-        extensions: List[str] = None,
+        output_dir: Optional[str] = None,
+        extensions: Optional[List[str]] = None,
         recursive: bool = True,
         **parser_kwargs
     ) -> List[str]:
@@ -241,7 +243,7 @@ class GameTranslator:
         
         return output_paths
     
-    def _translate_segments(self, segments: List) -> List[TextSegment]:
+    def _translate_segments(self, segments: List[TextSegment]) -> List[TextSegment]:
         """
         Translate all text segments using multi-threading for performance.
         
@@ -251,26 +253,25 @@ class GameTranslator:
         Returns:
             List of TextSegment objects with translated_text populated
         """
-        from tqdm import tqdm
+        from tqdm import tqdm  # type: ignore
         import threading
         
         translated = []
         failed = []
         total = len(segments)
-        completed = 0
+        completed = [0]
         
         # Thread-safe lock for updating shared variables
         lock = threading.Lock()
         
-        def process_segment(segment):
+        def process_segment(segment: TextSegment) -> Tuple[TextSegment, Optional[str]]:
             """Process a single segment (thread-safe)."""
-            nonlocal completed
             
             # Skip empty texts
             if not segment or not segment.text or not segment.text.strip():
                 segment.translated_text = segment.text
                 with lock:
-                    completed += 1
+                    completed[0] += 1
                 return segment, None
             
             # Check if should skip
@@ -278,7 +279,7 @@ class GameTranslator:
                 segment.translated_text = segment.text
                 with lock:
                     self.stats['skipped_texts'] += 1
-                    completed += 1
+                    completed[0] += 1
                 
                 with lock:
                     self.translation_log.append({
@@ -303,7 +304,7 @@ class GameTranslator:
                 segment.translated_text = translated_text
                 with lock:
                     self.stats['translated_texts'] += 1
-                    completed += 1
+                    completed[0] += 1
                 
                 # Log translation
                 with lock:
@@ -321,7 +322,7 @@ class GameTranslator:
                 segment.translated_text = segment.text
                 with lock:
                     self.stats['failed_texts'] += 1
-                    completed += 1
+                    completed[0] += 1
                 
                 # Log failure
                 with lock:
@@ -346,7 +347,7 @@ class GameTranslator:
         pbar = None
         if use_pbar:
             try:
-                from tqdm import tqdm
+                from tqdm import tqdm  # type: ignore
                 pbar = tqdm(
                     total=total,
                     desc="Translating",
@@ -359,7 +360,7 @@ class GameTranslator:
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 提交所有任务
-            future_to_segment = {executor.submit(process_segment, seg): seg for seg in segments}
+            future_to_segment = {executor.submit(process_segment, seg): seg for seg in segments}  # type: ignore
             
             # 处理完成的任务
             for future in concurrent.futures.as_completed(future_to_segment):
@@ -367,13 +368,14 @@ class GameTranslator:
                 translated.append(segment)
                 
                 # Update progress
-                if use_pbar:
-                    pbar.update(1)
-                    pbar.set_description(f"Translating ({completed}/{total})")
-                elif self.progress_callback:
+                cb = self.progress_callback
+                if use_pbar and pbar is not None:
+                    pbar.update(1)  # type: ignore
+                    pbar.set_description(f"Translating ({completed[0]}/{total})")  # type: ignore
+                elif cb is not None:
                     with lock:
-                        current_completed = completed
-                    should_continue = self.progress_callback(current_completed, total)
+                        current_completed = completed[0]
+                    should_continue = cb(current_completed, total)
                     if not should_continue:
                         print("Translation cancelled by user.")
                         # Cancel remaining futures
@@ -386,18 +388,32 @@ class GameTranslator:
                     failed.append((segment.text, err))
         
       # 直接把多余的嵌套 if 去掉，并保持正确的缩进
-        if use_pbar and pbar:  # 防止 pbar 未定义时报错
-            pbar.close()
+        if pbar is not None:
+            pbar.close()  # type: ignore
         
         # Report failures
         if failed:
             print(f"\n  {len(failed)} translations failed:")
-            for orig, err in failed[:5]:  # Show first 5 failures
+            for i, (orig, err) in enumerate(failed):
+                if i >= 5:
+                    break
                 print(f"    - '{orig[:50]}...': {err}")
             if len(failed) > 5:
                 print(f"    ... and {len(failed) - 5} more")
         
         return translated
+
+    def translate(self, text: str) -> str:
+        """Translate a single string."""
+        if self._should_skip(text):
+            return text
+        preserved, pmap = self._preserve_placeholders(text)
+        try:
+            translated = self.translator.translate_with_retry(preserved)
+            return self._restore_placeholders(translated, pmap)
+        except Exception as e:
+            self._log(f"Translation failed: {e}")
+            return text
     
     def _should_skip(self, text: str) -> bool:
         """Check if text should be skipped."""
@@ -419,15 +435,15 @@ class GameTranslator:
         if not self.preserve_patterns:
             return text, {}
         
-        placeholders = {}
-        result = text
+        placeholders: Dict[str, str] = {}
+        result: str = text
         
         for pattern in self.preserve_patterns:
-            matches = re.findall(pattern, text)
+            matches: List[str] = [str(m.group(0)) for m in re.finditer(pattern, text)]
             for match in matches:
                 token = f"__PH_{len(placeholders)}__"
                 placeholders[token] = match
-                result = result.replace(match, token, 1)
+                result = str(result).replace(match, token, 1)
         
         return result, placeholders
     
@@ -458,7 +474,9 @@ class GameTranslator:
         
         for root, dirs, filenames in os.walk(directory):
             # Modify dirs in-place to skip irrelevant directories early
-            dirs[:] = [d for d in dirs if d.lower() not in skip_dirs]
+            filtered = [d for d in dirs if str(d).lower() not in skip_dirs]
+            dirs.clear()
+            dirs.extend(filtered)
             
             for filename in filenames:
                 ext = os.path.splitext(filename)[1].lower()
