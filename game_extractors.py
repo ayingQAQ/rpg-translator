@@ -179,8 +179,15 @@ def extract_generic_text(game_path: Path, engine_info: Dict) -> List[Dict[str, A
                     continue
                 
                 # Skip files in obvious non-text directories
-                skip_dirs = ['img', 'images', 'graphics', 'audio', 'sound', 'music', 'movies', 'video', 'movies']
+                skip_dirs = ['img', 'images', 'graphics', 'audio', 'sound', 'music', 'movies', 'video']
                 if any(skip_dir in file_path.parts for skip_dir in skip_dirs):
+                    continue
+                    
+                # [CRITICAL FIX] Skip system json files, emulator files, and translation tool's own logs/backups
+                system_files = ['package.json', 'manifest.json', 'vk_swiftshader_icd.json', 'translation_log.json', 'jsconfig.json']
+                if file_path.name in system_files or file_path.name.startswith('.'):
+                    continue
+                if '.backup' in file_path.name:
                     continue
                 
                 if ext == '*.json':
@@ -240,15 +247,22 @@ def is_text_data_file(data: Any) -> bool:
     text_patterns = ['name', 'text', 'message', 'dialogue', 'description', 'note', 'terms', 'title']
     
     if isinstance(data, dict):
-        # Check keys
+        # Check values, but require them to be mapped to a text-like key if the dictionary has many keys, 
+        # or require at least one 'text' pattern key to be present in the dict to classify it as a text data file.
+        text_key_found = False
         for key in data.keys():
             if isinstance(key, str) and any(pattern in key.lower() for pattern in text_patterns):
-                return True
-        
-        # Check values
-        for value in data.values():
-            if isinstance(value, str) and len(value) > 0 and not value.startswith('data:'):
-                return True
+                text_key_found = True
+                break
+                
+        if text_key_found:
+            return True
+            
+        # If no semantic key is found, only consider it text if it has a large number of string values
+        # meaning it's likely a purely string-value dictionary (like a localization file)
+        str_count = sum(1 for v in data.values() if isinstance(v, str) and len(v) > 1 and not v.startswith('data:'))
+        if str_count >= max(2, int(len(data) * 0.3)):  # at least 30% of values are strings
+            return True
     
     elif isinstance(data, list) and len(data) > 0:
         # Check first few items
