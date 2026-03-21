@@ -16,6 +16,103 @@ import xml.etree.ElementTree as ET
 # Add support for additional encodings
 import chardet # type: ignore
 
+MAX_TEXT_FILE_SIZE = 10 * 1024 * 1024
+
+# Unified file filtering rules shared by extraction and batch scanning.
+DEFAULT_SKIP_DIR_NAMES = {
+    'img', 'images', 'graphics', 'audio', 'sound', 'music', 'movies', 'video',
+    'save', 'saves', 'output', 'outputs', 'translated', 'translations',
+    'backup', 'backups', 'log', 'logs', 'tmp', 'temp', 'cache', '__pycache__',
+    '.git', 'docs'
+}
+
+SYSTEM_SKIP_FILENAMES = {
+    'translation_log.json', 'package.json', 'manifest.json',
+    'vk_swiftshader_icd.json', 'jsconfig.json'
+}
+
+TRANSLATED_SUFFIX_PATTERN = re.compile(
+    r'_(?:zh(?:[-_](?:cn|tw|hans|hant))?|translated)$',
+    re.IGNORECASE
+)
+
+GENERIC_PRIORITY_DIRS = (
+    'data', 'www/data', 'game', 'lang', 'langs', 'locale', 'locales',
+    'i18n', 'text', 'texts'
+)
+
+
+def should_skip_dir_name(dir_name: str) -> bool:
+    """Return True if a directory name is irrelevant for text extraction."""
+    normalized = dir_name.strip().lower()
+    if not normalized:
+        return False
+    return normalized in DEFAULT_SKIP_DIR_NAMES or normalized.startswith('.')
+
+
+def is_irrelevant_text_file(file_path: Path, scan_root: Optional[Path] = None) -> bool:
+    """Return True when file should be ignored by extraction/scan."""
+    name = file_path.name
+    name_lower = name.lower()
+
+    if name.startswith('.'):
+        return True
+    if name_lower in SYSTEM_SKIP_FILENAMES:
+        return True
+    if '.backup' in name_lower:
+        return True
+    if TRANSLATED_SUFFIX_PATTERN.search(file_path.stem.lower()):
+        return True
+
+    if scan_root:
+        # Only inspect parts relative to the scan root to avoid false positives
+        # from absolute temp/system paths (for example ".../Temp/...").
+        try:
+            rel_parts = file_path.resolve().relative_to(scan_root.resolve()).parts[:-1]
+            for part in rel_parts:
+                if should_skip_dir_name(part):
+                    return True
+        except Exception:
+            pass
+    else:
+        for part in file_path.parts[:-1]:
+            if should_skip_dir_name(part):
+                return True
+
+    return False
+
+
+def get_generic_scan_roots(game_path: Path) -> List[Path]:
+    """Prefer common game data roots, fallback to whole directory."""
+    roots: List[Path] = []
+    for rel_dir in GENERIC_PRIORITY_DIRS:
+        candidate = game_path / rel_dir
+        if candidate.is_dir():
+            roots.append(candidate)
+
+    return roots if roots else [game_path]
+
+
+def dedupe_extracted_files(extracted_files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """De-duplicate extracted file list by absolute path while preserving order."""
+    deduped: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for file_info in extracted_files:
+        path_obj = Path(file_info['path'])
+        try:
+            key = str(path_obj.resolve()).lower()
+        except Exception:
+            key = str(path_obj).lower()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        deduped.append(file_info)
+
+    return deduped
+
 
 def detect_file_encoding(file_path: Path) -> str:
     """Detect file encoding using chardet."""
@@ -79,11 +176,13 @@ def detect_game_engine(game_path: Path) -> Optional[Dict[str, Any]]:
         }
     
     # Check for Unity games (common patterns)
-    if (game_path / "*.assets").exists() or (game_path / "Managed").exists():
+    unity_data_dirs = [p for p in game_path.glob("*_Data") if p.is_dir()]
+    managed_dirs = [p for p in game_path.rglob("Managed") if p.is_dir()]
+    if unity_data_dirs or managed_dirs:
         return {
             'engine': 'unity',
             'version': 'unity',
-            'data_dir': game_path,
+            'data_dir': unity_data_dirs[0] if unity_data_dirs else game_path,
             'text_patterns': ['text', 'message', 'name', 'description']
         }
     
@@ -96,18 +195,16 @@ def detect_game_engine(game_path: Path) -> Optional[Dict[str, Any]]:
             'text_patterns': ['text', 'dialogue', 'menu', 'prompt']
         }
     
-    # Check for general text files
-    json_files = list(game_path.glob("**/*.json"))
-    csv_files = list(game_path.glob("**/*.csv"))
-    txt_files = list(game_path.glob("**/*.txt"))
-    
-    if json_files or csv_files or txt_files:
-        return {
-            'engine': 'generic',
-            'version': 'generic',
-            'data_dir': game_path,
-            'text_patterns': ['text', 'message', 'dialogue', 'name', 'description', 'note', 'terms']
-        }
+    # Check for general text files (respect ignore rules)
+    for pattern in ("*.json", "*.csv", "*.txt"):
+        for file_path in game_path.rglob(pattern):
+            if file_path.is_file() and not is_irrelevant_text_file(file_path, game_path):
+                return {
+                    'engine': 'generic',
+                    'version': 'generic',
+                    'data_dir': game_path,
+                    'text_patterns': ['text', 'message', 'dialogue', 'name', 'description', 'note', 'terms']
+                }
     
     return None
 
@@ -115,6 +212,63 @@ def detect_game_engine(game_path: Path) -> Optional[Dict[str, Any]]:
 def extract_rpgmv_text(data_dir: Path, engine_info: Dict) -> List[Dict[str, Any]]:
     """Extract text from RPG Maker MV/MZ game."""
     extracted_files = []
+
+    def _has_translatable_in_map(map_data: Any) -> bool:
+        """Fast check to skip map files without translatable text payload."""
+        if not isinstance(map_data, dict):
+            return False
+
+        # displayName may be shown to player; note is often metadata tags and is excluded.
+        for map_field in ('displayName',):
+            value = map_data.get(map_field)
+            if isinstance(value, str) and value.strip():
+                return True
+
+        events = map_data.get('events', [])
+        if not isinstance(events, list):
+            return False
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            pages = event.get('pages', [])
+            if not isinstance(pages, list):
+                continue
+            for page in pages:
+                if not isinstance(page, dict):
+                    continue
+                cmd_list = page.get('list', [])
+                if not isinstance(cmd_list, list):
+                    continue
+                for command in cmd_list:
+                    if not isinstance(command, dict):
+                        continue
+                    code = command.get('code')
+                    params = command.get('parameters', [])
+                    if not isinstance(params, list):
+                        params = []
+
+                    # 401: Show Text line
+                    if code == 401 and params and isinstance(params[0], str) and params[0].strip():
+                        return True
+                    # 102: Show Choices (parameters[0] is choice list)
+                    if code == 102 and params and isinstance(params[0], list):
+                        if any(isinstance(choice, str) and choice.strip() for choice in params[0]):
+                            return True
+                    # 402: When [Choice]
+                    if code == 402 and len(params) > 1 and isinstance(params[1], str) and params[1].strip():
+                        return True
+                    # 405: Scroll Text line
+                    if code == 405 and params and isinstance(params[0], str) and params[0].strip():
+                        return True
+                    # 101: Show Text header (speaker name in params[4] for MZ-style data)
+                    if code == 101 and len(params) > 4 and isinstance(params[4], str) and params[4].strip():
+                        return True
+                    # 320/324/325: change actor name/nickname/profile
+                    if code in {320, 324, 325} and len(params) > 1 and isinstance(params[1], str) and params[1].strip():
+                        return True
+
+        return False
     
     # Define files to extract from
     extract_files = [
@@ -149,7 +303,7 @@ def extract_rpgmv_text(data_dir: Path, engine_info: Dict) -> List[Dict[str, Any]
             with open(map_file, 'r', encoding=encoding) as f:
                 map_data = json.load(f)
             
-            if map_data and 'events' in map_data:
+            if _has_translatable_in_map(map_data):
                 extracted_files.append({
                     'path': map_file,
                     'type': 'Map',
@@ -163,77 +317,73 @@ def extract_rpgmv_text(data_dir: Path, engine_info: Dict) -> List[Dict[str, Any]
 
 
 def extract_generic_text(game_path: Path, engine_info: Dict) -> List[Dict[str, Any]]:
-    """Extract text from generic JSON/CSV/TXT files."""
-    extracted_files = []
-    
-    # Supported extensions
-    extensions = ['*.json', '*.csv', '*.txt', '*.xml', '*.yaml', '*.yml']
-    
-    for ext in extensions:
-        for file_path in game_path.rglob(ext):
-            try:
-                file_size = file_path.stat().st_size
-                
-                # Skip files that are too large (> 10MB)
-                if file_size > 10 * 1024 * 1024:
+    """Extract text from generic files using prioritized roots and unified filtering."""
+    extracted_files: List[Dict[str, Any]] = []
+    seen_files: set[str] = set()
+
+    scan_targets = [
+        ('*.json', 'JSON Data'),
+        ('*.csv', 'CSV Data'),
+        ('*.txt', 'Text File'),
+        ('*.xml', 'XML Data'),
+        ('*.yaml', 'YAML Data'),
+        ('*.yml', 'YAML Data'),
+    ]
+
+    for scan_root in get_generic_scan_roots(game_path):
+        for pattern, file_type in scan_targets:
+            for file_path in scan_root.rglob(pattern):
+                if not file_path.is_file():
                     continue
-                
-                # Skip files in obvious non-text directories
-                skip_dirs = ['img', 'images', 'graphics', 'audio', 'sound', 'music', 'movies', 'video']
-                if any(skip_dir in file_path.parts for skip_dir in skip_dirs):
+
+                try:
+                    cache_key = str(file_path.resolve()).lower()
+                except Exception:
+                    cache_key = str(file_path).lower()
+
+                if cache_key in seen_files:
                     continue
-                    
-                # [CRITICAL FIX] Skip system json files, emulator files, and translation tool's own logs/backups
-                system_files = ['package.json', 'manifest.json', 'vk_swiftshader_icd.json', 'translation_log.json', 'jsconfig.json']
-                if file_path.name in system_files or file_path.name.startswith('.'):
+                seen_files.add(cache_key)
+
+                try:
+                    if is_irrelevant_text_file(file_path, game_path):
+                        continue
+
+                    file_size = file_path.stat().st_size
+                    if file_size > MAX_TEXT_FILE_SIZE:
+                        continue
+
+                    if pattern == '*.json':
+                        encoding = detect_file_encoding(file_path)
+                        with open(file_path, 'r', encoding=encoding) as f:
+                            data = json.load(f)
+                        if not is_text_data_file(data):
+                            continue
+                    elif pattern == '*.csv':
+                        import csv
+                        encoding = detect_file_encoding(file_path)
+                        with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
+                            rows = list(csv.reader(f))
+                            if len(rows) <= 1:
+                                continue
+                    else:
+                        encoding = detect_file_encoding(file_path)
+                        with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
+                            preview = f.read(200)
+                            if not preview.strip():
+                                continue
+
+                    extracted_files.append({
+                        'path': file_path,
+                        'type': file_type,
+                        'engine': 'generic',
+                        'content': None
+                    })
+                except Exception as e:
+                    print(f"Error processing {file_path}: {e}")
                     continue
-                if '.backup' in file_path.name:
-                    continue
-                
-                if ext == '*.json':
-                    encoding = detect_file_encoding(file_path)
-                    with open(file_path, 'r', encoding=encoding) as f:
-                        data = json.load(f)
-                    
-                    # Check if it's likely a text data file
-                    if is_text_data_file(data):
-                        extracted_files.append({
-                            'path': file_path,
-                            'type': 'JSON Data',
-                            'engine': 'generic',
-                            'content': None
-                        })
-                
-                elif ext == '*.csv':
-                    import csv
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        reader = csv.reader(f)
-                        rows = list(reader)
-                        if len(rows) > 1:  # Has data
-                            extracted_files.append({
-                                'path': file_path,
-                                'type': 'CSV Data',
-                                'engine': 'generic',
-                                'content': None
-                            })
-                
-                elif ext == '*.txt':
-                    encoding = detect_file_encoding(file_path)
-                    with open(file_path, 'r', encoding=encoding) as f:
-                        content = f.read(100) # Only peek to see if not empty
-                        if len(content.strip()) > 0:
-                            extracted_files.append({
-                                'path': file_path,
-                                'type': 'Text File',
-                                'engine': 'generic',
-                                'content': None
-                            })
-            
-            except Exception as e:
-                print(f"Error processing {file_path}: {e}")
-                continue
-    
-    return extracted_files
+
+    return dedupe_extracted_files(extracted_files)
 
 
 def is_text_data_file(data: Any) -> bool:
@@ -385,7 +535,7 @@ def extract_renpy_text(game_path: Path, engine_info: Dict) -> List[Dict[str, Any
             except Exception as e:
                 print(f"Error reading Ren'Py data file {file_path}: {e}")
     
-    return extracted_files
+    return dedupe_extracted_files(extracted_files)
 
 
 def extract_game_text(game_path: Path, engine_info: Dict) -> List[Dict[str, Any]]:
@@ -403,14 +553,23 @@ def extract_game_text(game_path: Path, engine_info: Dict) -> List[Dict[str, Any]
     data_dir = engine_info.get('data_dir', game_path)
     
     if engine == 'rpgmv':
-        return extract_rpgmv_text(data_dir, engine_info)
+        # RPGMV/MZ: core data JSON + Map*.json from data directory.
+        print("[Extract] RPGMV/MZ target: data/*.json + Map*.json")
+        extracted = extract_rpgmv_text(data_dir, engine_info)
     elif engine == 'wolf':
-        return extract_wolf_text(data_dir, engine_info)
+        # Wolf RPG: CommonEvents/Map*.dat and related data files.
+        print("[Extract] Wolf target: CommonEvents.dat + Map*.dat + core dat files")
+        extracted = extract_wolf_text(data_dir, engine_info)
     elif engine == 'renpy':
-        return extract_renpy_text(data_dir, engine_info)
+        # Ren'Py: script files under game/*.rpy.
+        print("[Extract] Ren'Py target: game/**/*.rpy")
+        extracted = extract_renpy_text(data_dir, engine_info)
     else:
-        # For unity, generic, and other engines, use generic extraction
-        return extract_generic_text(data_dir, engine_info)
+        # Generic/Unity fallback: text-like structured files with filters.
+        print("[Extract] Generic target: json/csv/txt/xml/yaml in priority data roots")
+        extracted = extract_generic_text(data_dir, engine_info)
+
+    return dedupe_extracted_files(extracted)
 
 
 def _extract_rpgm_commands(cmd_list: List[Dict[str, Any]], prefix: str, text_entries: Dict[str, str]):

@@ -17,8 +17,9 @@ try:
                                  QGroupBox, QComboBox, QCheckBox, QFileDialog,
                                  QLineEdit, QPlainTextEdit, QTabWidget, QListWidget,
                                  QListWidgetItem, QMenu, QAction, QToolBar, QStatusBar,
-                                 QDockWidget, QTableWidget, QTableWidgetItem, QAbstractItemView)
-    from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDir, QModelIndex, QTimer  # type: ignore
+                                 QDockWidget, QTableWidget, QTableWidgetItem, QAbstractItemView,
+                                 QHeaderView, QGraphicsDropShadowEffect)
+    from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDir, QModelIndex, QTimer, QSettings  # type: ignore
     from PyQt5.QtGui import QIcon, QFont, QColor, QStandardItemModel, QStandardItem  # type: ignore
 except ImportError:
     print("PyQt5 is not installed. Please install it with:")
@@ -97,12 +98,12 @@ class TranslationThread(QThread):
 
 
 class OneClickTranslateThread(QThread):
-    """一键汉化后台线程"""
+    """One-click translation worker thread."""
     progress = pyqtSignal(int, int)  # current, total
     log_message = pyqtSignal(str)
     finished = pyqtSignal(bool, str)  # success, message
     error = pyqtSignal(str)
-    
+
     def __init__(self, game_path, engine, source_lang, target_lang, delay=0.1):
         super().__init__()
         self.game_path = game_path
@@ -112,56 +113,132 @@ class OneClickTranslateThread(QThread):
         self.delay = delay
         self.translator = None
         self._stop_requested = False
-    
+
     def run(self):
         """Run one-click translation in background."""
         try:
-            self.log_message.emit("🚀 开始一键汉化工作流...")
-            
-            # 1. 初始化核心翻译器
+            self.log_message.emit('Starting one-click translation workflow...')
+
             gt = GameTranslator(
                 engine=self.engine,
                 source_lang=self.source_lang,
                 target_lang=self.target_lang,
-                delay=self.delay  # 因为有多线程了，可以把延迟调低
+                delay=self.delay,
             )
             self.translator = gt
-            
-            # Set up callbacks
+
             def progress_callback(current, total):
-                self.progress.emit(current, total)
+                # Keep cancellation support inside per-file translation.
                 return not self._stop_requested
-            
+
             def log_callback(message):
                 self.log_message.emit(message)
-            
+
             gt.set_progress_callback(progress_callback)
             gt.set_log_callback(log_callback)
-            
-            # 2. 直接调用 translate_directory 翻译整个文件夹
-            # 它会自动扫描、解析、翻译、并保存覆盖（会生成backup）
-            output_paths = gt.translate_directory(
-                input_dir=str(self.game_path),
-                output_dir=str(self.game_path),  # 直接覆盖到原目录，实现真·一键汉化
-                recursive=True
-            )
-            
-            if self._stop_requested:
-                self.finished.emit(False, "🚫 汉化已取消")
+
+            game_path = Path(self.game_path)
+            engine_info = detect_game_engine(game_path)
+            if not engine_info:
+                self.finished.emit(False, 'Could not detect game engine in selected directory.')
+                return
+
+            engine_name = str(engine_info.get('engine', 'unknown'))
+            self.log_message.emit(f'Detected game engine: {engine_name}')
+
+            # Explicitly log intended engine-specific target ranges.
+            if engine_name == 'rpgmv':
+                self.log_message.emit('Target scope: data/*.json + Map*.json')
+            elif engine_name == 'renpy':
+                self.log_message.emit('Target scope: game/**/*.rpy')
+            elif engine_name == 'wolf':
+                self.log_message.emit('Target scope: CommonEvents.dat + Map*.dat + core dat files')
             else:
-                self.finished.emit(True, f"🎉 一键汉化完成！共处理 {len(output_paths)} 个文件。")
-                
+                self.log_message.emit('Target scope: generic text-like files in game data roots')
+
+            extracted_files = extract_game_text(game_path, engine_info)
+            if not extracted_files:
+                self.finished.emit(False, 'No candidate text files found for this game.')
+                return
+
+            deduped_paths = []
+            seen_paths = set()
+            for file_info in extracted_files:
+                file_path = Path(file_info['path'])
+                try:
+                    path_key = str(file_path.resolve()).lower()
+                except Exception:
+                    path_key = str(file_path).lower()
+                if path_key in seen_paths:
+                    continue
+                seen_paths.add(path_key)
+                deduped_paths.append(file_path)
+
+            supported_extensions = {ext.lower() for ext in get_supported_formats()}
+            translatable_paths = []
+            unsupported_paths = []
+
+            for file_path in deduped_paths:
+                if file_path.suffix.lower() in supported_extensions:
+                    translatable_paths.append(file_path)
+                else:
+                    unsupported_paths.append(file_path)
+
+            self.log_message.emit(
+                f'Candidates: {len(deduped_paths)} files, translatable now: {len(translatable_paths)}'
+            )
+            if unsupported_paths:
+                preview = ', '.join(p.name for p in unsupported_paths[:5])
+                self.log_message.emit(
+                    f'Skipped unsupported formats: {len(unsupported_paths)} (examples: {preview})'
+                )
+
+            if not translatable_paths:
+                self.finished.emit(False, 'No parser-supported files found in extracted candidates.')
+                return
+
+            output_paths = []
+            failed_count = 0
+            total_files = len(translatable_paths)
+            self.progress.emit(0, total_files)
+
+            for idx, input_file in enumerate(translatable_paths, 1):
+                if self._stop_requested:
+                    self.finished.emit(False, 'One-click translation cancelled.')
+                    return
+
+                self.log_message.emit(f'[{idx}/{total_files}] Translating: {input_file.name}')
+                try:
+                    result_path = gt.translate_file(str(input_file), str(input_file))
+                    output_paths.append(result_path)
+                except Exception as file_error:
+                    failed_count += 1
+                    self.log_message.emit(f'Failed: {input_file.name} -> {file_error}')
+                finally:
+                    self.progress.emit(idx, total_files)
+
+            if self._stop_requested:
+                self.finished.emit(False, 'One-click translation cancelled.')
+            else:
+                self.finished.emit(
+                    True,
+                    (
+                        f'One-click translation completed. '
+                        f'Succeeded: {len(output_paths)}, Failed: {failed_count}, '
+                        f'Skipped unsupported: {len(unsupported_paths)}'
+                    ),
+                )
+
         except Exception as e:
             self.error.emit(str(e))
-            self.finished.emit(False, f"❌ 一键汉化失败: {str(e)}")
-    
+            self.finished.emit(False, f'One-click translation failed: {str(e)}')
+
     def stop(self):
         """Request thread to stop."""
         self._stop_requested = True
         if self.translator:
-            # Cancel any ongoing translation
+            # Cancellation is checked via progress callback.
             pass
-
 
 class RestoreThread(QThread):
     """一键恢复后台线程"""
@@ -172,15 +249,19 @@ class RestoreThread(QThread):
     def __init__(self, game_path):
         super().__init__()
         self.game_path = Path(game_path)
+        self._stop_requested = False
 
     def run(self):
         try:
-            self.log_message.emit("⏪ 开始扫描备份文件...")
+            self.log_message.emit("开始扫描备份文件...")
             
             # 查找所有包含 .backup 的文件
             backup_files = []
             for ext in ['*.json', '*.csv', '*.txt', '*.yaml', '*.xml', '*.rpy']:
                 for file in self.game_path.rglob(ext):
+                    if self._stop_requested:
+                        self.finished.emit(False, "恢复已取消。")
+                        return
                     if '.backup' in file.name:
                         backup_files.append(file)
             
@@ -192,6 +273,9 @@ class RestoreThread(QThread):
             restored_count = 0
             
             for i, backup_path in enumerate(backup_files):
+                if self._stop_requested:
+                    self.finished.emit(False, "恢复已取消。")
+                    return
                 # 利用正则还原真实文件名
                 # 兼容 "name.backup.json" 和 "name.backup_123456.json" 两种命名方式
                 original_name = re.sub(r'\.backup(_\d+)?', '', backup_path.name)
@@ -204,10 +288,14 @@ class RestoreThread(QThread):
                 restored_count += 1
                 self.progress.emit(i + 1, total)
                 
-            self.finished.emit(True, f"🎉 成功恢复了 {restored_count} 个原版文件！")
+            self.finished.emit(True, f"成功恢复了 {restored_count} 个原版文件。")
             
         except Exception as e:
-            self.finished.emit(False, f"❌ 恢复过程中出错: {str(e)}")
+            self.finished.emit(False, f"恢复过程中出错: {str(e)}")
+
+    def stop(self):
+        """Request thread to stop."""
+        self._stop_requested = True
 
 
 class GameTextExtractorThread(QThread):
@@ -221,11 +309,15 @@ class GameTextExtractorThread(QThread):
     def __init__(self, game_path):
         super().__init__()
         self.game_path = game_path
+        self._stop_requested = False
     
     def run(self):
         """Extract game text in background."""
         try:
             self.log_message.emit(f"Detecting game engine in: {self.game_path}")
+            if self._stop_requested:
+                self.finished.emit(False, [])
+                return
             
             # Detect game engine
             engine_info = detect_game_engine(self.game_path)
@@ -235,16 +327,26 @@ class GameTextExtractorThread(QThread):
                 return
             
             self.log_message.emit(f"Detected: {engine_info['engine']} v{engine_info.get('version', 'unknown')}")
+            if self._stop_requested:
+                self.finished.emit(False, [])
+                return
             
             # Extract text
             self.log_message.emit("Extracting text files...")
             extracted_files = extract_game_text(self.game_path, engine_info)
+            if self._stop_requested:
+                self.finished.emit(False, [])
+                return
             
             self.finished.emit(True, extracted_files)
             
         except Exception as e:
             self.error.emit(str(e))
             self.finished.emit(False, [])
+
+    def stop(self):
+        """Request thread to stop."""
+        self._stop_requested = True
 
 
 class TextTableWidget(QTableWidget):
@@ -256,14 +358,25 @@ class TextTableWidget(QTableWidget):
         self.setHorizontalHeaderLabels(["Key", "Original Text", "Translated Text", "Status"])
         header = self.horizontalHeader()
         if header is not None:
-            header.setStretchLastSection(True)
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # type: ignore
+            header.setSectionResizeMode(1, QHeaderView.Stretch)  # type: ignore
+            header.setSectionResizeMode(2, QHeaderView.Stretch)  # type: ignore
+            header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # type: ignore
         self.setAlternatingRowColors(True)
+        self.setShowGrid(False)
+        self.verticalHeader().setVisible(False)  # type: ignore
+        self.verticalHeader().setDefaultSectionSize(30)  # type: ignore
         self.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setSortingEnabled(True)
     
     def load_text_data(self, text_data: List[Dict]):
         """Load text data into table."""
+        was_sorting_enabled = self.isSortingEnabled()
+        if was_sorting_enabled:
+            self.setSortingEnabled(False)
         self.setRowCount(len(text_data))
         
         for row, item in enumerate(text_data):
@@ -295,6 +408,8 @@ class TextTableWidget(QTableWidget):
                 status_item.setBackground(QColor(255, 200, 200))  # Light red
             
             self.setItem(row, 3, status_item)
+        if was_sorting_enabled:
+            self.setSortingEnabled(True)
     
     def get_text_data(self) -> List[Dict]:
         """Get text data from table."""
@@ -320,23 +435,31 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("RPG Game Translator")
         self.setGeometry(100, 100, 1200, 800)
+        self.setMinimumSize(1080, 720)
+        self.settings = QSettings("RPGTranslator", "RPG Game Translator")
         
         # Initialize data
         self.current_project: Optional[Any] = None
         self.text_data: List[Dict[str, Any]] = []
         self.game_path: Optional[Path] = None
         self.current_file: Optional[Path] = None
+        self.main_splitter: Optional[QSplitter] = None
+        self.last_open_dir = str(self.settings.value("last_game_dir", "", type=str))
         self.translator_thread: Optional[TranslationThread] = None
         self.extractor_thread: Optional[GameTextExtractorThread] = None
         self.one_click_thread: Optional[OneClickTranslateThread] = None
         self.restore_thread: Optional[RestoreThread] = None
         self.current_parser: Optional[BaseParser] = None
+        self.status_engine_label: Optional[QLabel] = None
+        self.status_files_label: Optional[QLabel] = None
         
         # Setup UI
         self.setup_ui()
         self.setup_menus()
         self.setup_toolbar()
         self.setup_statusbar()
+        self.apply_visual_theme()
+        self.restore_window_state()
         
         # Update UI state
         self.update_ui_state()
@@ -349,9 +472,17 @@ class MainWindow(QMainWindow):
         
         # Main layout
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(14, 14, 14, 12)
+        main_layout.setSpacing(10)
+
+        # Top banner
+        hero_banner = self.create_hero_banner()
+        main_layout.addWidget(hero_banner)
         
         # Create splitter for resizable panels
         splitter = QSplitter(Qt.Horizontal)  # type: ignore
+        splitter.setHandleWidth(8)
+        self.main_splitter = splitter
         
         # Left panel - Project/Files
         left_panel = self.create_left_panel()
@@ -368,60 +499,111 @@ class MainWindow(QMainWindow):
         
         # Progress bar
         self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("mainProgress")
+        self.progress_bar.setFixedHeight(18)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("Processing %p%")
         self.progress_bar.setVisible(False)
         main_layout.addWidget(self.progress_bar)
+
+    def create_hero_banner(self):
+        """Create a compact header banner."""
+        banner = QWidget()
+        banner.setObjectName("heroBanner")
+        banner_layout = QHBoxLayout(banner)
+        banner_layout.setContentsMargins(14, 12, 14, 12)
+        banner_layout.setSpacing(10)
+
+        left_wrap = QWidget()
+        left_layout = QVBoxLayout(left_wrap)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(2)
+
+        title = QLabel("RPG 翻译工作台")
+        title.setObjectName("heroTitle")
+        subtitle = QLabel("引擎感知提取 + 精准批量翻译流程")
+        subtitle.setObjectName("heroSubtitle")
+        left_layout.addWidget(title)
+        left_layout.addWidget(subtitle)
+
+        hint = QLabel("提示：一键汉化只处理引擎命中的候选文件")
+        hint.setObjectName("heroHint")
+        hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # type: ignore
+
+        banner_layout.addWidget(left_wrap, 1)
+        banner_layout.addWidget(hint, 1)
+        return banner
     
     def create_left_panel(self):
         """Create left panel with project/file management."""
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
         
         # Project info group
         project_group = QGroupBox("Project")
+        project_group.setObjectName("panelCard")
         project_layout = QVBoxLayout()
+        project_layout.setSpacing(8)
         
         self.project_label = QLabel("No project loaded")
+        self.project_label.setObjectName("projectLabel")
         self.project_label.setWordWrap(True)
         project_layout.addWidget(self.project_label)
         
         self.load_game_btn = QPushButton("Load Game Directory")
+        self.load_game_btn.setMinimumHeight(36)
         self.load_game_btn.clicked.connect(self.load_game_directory)
         project_layout.addWidget(self.load_game_btn)
         
-        # 一键汉化按钮
-        self.one_click_btn = QPushButton("🚀 一键汉化 (Mtool 模式)")
-        self.one_click_btn.setMinimumHeight(50)  # 做大一点
-        self.one_click_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; font-size: 14px;")
+        # One-click translation action
+        self.one_click_btn = QPushButton("一键汉化 (Mtool 模式)")
+        self.one_click_btn.setMinimumHeight(48)
+        self.one_click_btn.setObjectName("primaryActionBtn")
         self.one_click_btn.clicked.connect(self.start_one_click_translation)
-        self.one_click_btn.setEnabled(False)  # 加载游戏后启用
+        self.one_click_btn.setEnabled(False)
         project_layout.addWidget(self.one_click_btn)
         
-        # 一键恢复按钮
-        self.restore_btn = QPushButton("⏪ 一键恢复 (还原原版)")
+        # Restore action
+        self.restore_btn = QPushButton("一键恢复 (还原原版)")
         self.restore_btn.setMinimumHeight(40)
-        # 用醒目的红色/橙色警示这涉及到文件覆盖
-        self.restore_btn.setStyleSheet("background-color: #E53935; color: white; font-weight: bold; font-size: 14px;")
+        self.restore_btn.setObjectName("dangerActionBtn")
         self.restore_btn.clicked.connect(self.start_restore)
         self.restore_btn.setEnabled(False) 
         project_layout.addWidget(self.restore_btn)
         
         project_group.setLayout(project_layout)
+        self.apply_card_shadow(project_group)
         left_layout.addWidget(project_group)
         
         # Extracted files list
         files_group = QGroupBox("Extracted Files")
+        files_group.setObjectName("panelCard")
         files_layout = QVBoxLayout()
+        files_layout.setSpacing(8)
+
+        self.file_filter_input = QLineEdit()
+        self.file_filter_input.setPlaceholderText("Filter files by name or type...")
+        self.file_filter_input.textChanged.connect(self.filter_extracted_files)
+        files_layout.addWidget(self.file_filter_input)
         
         self.files_list = QListWidget()
+        self.files_list.setObjectName("filesList")
+        self.files_list.setAlternatingRowColors(True)
+        self.files_list.setUniformItemSizes(True)
+        self.files_list.setToolTip("Double-click a file to load extracted text")
         self.files_list.itemDoubleClicked.connect(self.load_file_for_translation)
         files_layout.addWidget(self.files_list)
         
         self.extract_text_btn = QPushButton("Extract Game Text")
+        self.extract_text_btn.setMinimumHeight(34)
         self.extract_text_btn.clicked.connect(self.extract_game_text)
         self.extract_text_btn.setEnabled(False)
         files_layout.addWidget(self.extract_text_btn)
         
         files_group.setLayout(files_layout)
+        self.apply_card_shadow(files_group)
         left_layout.addWidget(files_group)
         
         return left_widget
@@ -430,9 +612,13 @@ class MainWindow(QMainWindow):
         """Create right panel with translation interface."""
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
         
         # File info
         self.file_label = QLabel("No file loaded")
+        self.file_label.setObjectName("fileInfoLabel")
+        self.file_label.setMinimumHeight(34)
         right_layout.addWidget(self.file_label)
         
         # Text table
@@ -441,7 +627,9 @@ class MainWindow(QMainWindow):
         
         # Translation controls
         controls_group = QGroupBox("Translation Settings")
+        controls_group.setObjectName("panelCard")
         controls_layout = QHBoxLayout()
+        controls_layout.setSpacing(8)
         
         # Translation engine
         controls_layout.addWidget(QLabel("Engine:"))
@@ -475,16 +663,22 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.translate_selected_btn)
         
         controls_group.setLayout(controls_layout)
+        self.apply_card_shadow(controls_group)
         right_layout.addWidget(controls_group)
         
         # Log output
         log_group = QGroupBox("Log")
+        log_group.setObjectName("panelCard")
         log_layout = QVBoxLayout()
         self.log_text = QPlainTextEdit()
+        self.log_text.setObjectName("logPanel")
         self.log_text.setReadOnly(True)
+        self.log_text.setPlaceholderText("Runtime logs appear here...")
+        self.log_text.setMaximumBlockCount(1500)
         self.log_text.setMaximumHeight(150)
         log_layout.addWidget(self.log_text)
         log_group.setLayout(log_layout)
+        self.apply_card_shadow(log_group)
         right_layout.addWidget(log_group)
         
         return right_widget
@@ -544,6 +738,10 @@ class MainWindow(QMainWindow):
     def setup_toolbar(self):
         """Setup toolbar."""
         toolbar = QToolBar("Main Toolbar")
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        toolbar.setIconSize(toolbar.iconSize())
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)  # type: ignore
         self.addToolBar(toolbar)
         
         # Add actions
@@ -563,12 +761,284 @@ class MainWindow(QMainWindow):
     
     def setup_statusbar(self):
         """Setup status bar."""
-        self.statusBar().showMessage("Ready")
+        status_bar = self.statusBar()
+        status_bar.setSizeGripEnabled(False)
+        status_bar.showMessage("Ready")
+
+        self.status_engine_label = QLabel("Engine: --")
+        self.status_files_label = QLabel("Files: 0")
+        self.status_engine_label.setObjectName("statusPill")
+        self.status_files_label.setObjectName("statusPill")
+        status_bar.addPermanentWidget(self.status_engine_label)
+        status_bar.addPermanentWidget(self.status_files_label)
+
+    def restore_window_state(self):
+        """Restore persisted window geometry and splitter sizes."""
+        geometry = self.settings.value("window_geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+
+        splitter_sizes = self.settings.value("splitter_sizes")
+        if self.main_splitter is not None and isinstance(splitter_sizes, list):
+            try:
+                sizes = [int(v) for v in splitter_sizes]
+                if sizes:
+                    self.main_splitter.setSizes(sizes)
+            except (TypeError, ValueError):
+                pass
+
+    def save_window_state(self):
+        """Persist window geometry and splitter sizes."""
+        self.settings.setValue("window_geometry", self.saveGeometry())
+        if self.main_splitter is not None:
+            self.settings.setValue("splitter_sizes", self.main_splitter.sizes())
+
+    def visible_file_count(self) -> int:
+        """Return visible item count in file list."""
+        visible = 0
+        for i in range(self.files_list.count()):
+            if not self.files_list.item(i).isHidden():
+                visible += 1
+        return visible
+
+    def refresh_file_status_count(self):
+        """Update status bar with visible/total file count."""
+        if self.status_files_label is None:
+            return
+        total = self.files_list.count()
+        visible = self.visible_file_count()
+        if visible != total:
+            self.status_files_label.setText(f"Files: {visible}/{total}")
+        else:
+            self.status_files_label.setText(f"Files: {total}")
+
+    def apply_card_shadow(self, widget):
+        """Apply subtle depth to card-like panels."""
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 3)
+        shadow.setColor(QColor(29, 52, 84, 35))
+        widget.setGraphicsEffect(shadow)
+
+    def apply_visual_theme(self):
+        """Apply an intentional, high-contrast desktop theme."""
+        app_font = QFont("Microsoft YaHei UI", 10)
+        self.setFont(app_font)
+        self.setStyleSheet(
+            """
+            QMainWindow {
+                background: #f2f6fb;
+            }
+            QMenuBar {
+                background: #ffffff;
+                border-bottom: 1px solid #cfdae8;
+                padding: 4px 6px;
+                color: #1a4169;
+            }
+            QMenuBar::item {
+                background: transparent;
+                border-radius: 6px;
+                padding: 5px 10px;
+                margin: 0 2px;
+            }
+            QMenuBar::item:selected {
+                background: #e9f2ff;
+            }
+            QMenu {
+                background: #ffffff;
+                border: 1px solid #cfdae8;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 12px;
+                border-radius: 6px;
+            }
+            QMenu::item:selected {
+                background: #e9f2ff;
+            }
+            QWidget#heroBanner {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #173a63, stop:1 #1f5f8b);
+                border: 1px solid #2f6f9a;
+                border-radius: 12px;
+            }
+            QLabel#heroTitle {
+                color: #ffffff;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            QLabel#heroSubtitle {
+                color: #dceeff;
+                font-size: 11px;
+            }
+            QLabel#heroHint {
+                color: #ffecc5;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QToolBar {
+                background: #ffffff;
+                border: 1px solid #cfdae8;
+                border-radius: 10px;
+                spacing: 6px;
+                padding: 6px 8px;
+            }
+            QToolButton {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 8px;
+                padding: 6px 10px;
+                color: #173a63;
+                font-weight: 600;
+            }
+            QToolButton:hover {
+                background: #e9f2ff;
+                border-color: #c8daff;
+            }
+            QStatusBar {
+                background: #ffffff;
+                border-top: 1px solid #cfdae8;
+                color: #35526f;
+            }
+            QLabel#statusPill {
+                background: #edf4ff;
+                border: 1px solid #d0e1ff;
+                border-radius: 10px;
+                padding: 3px 8px;
+                color: #1a4169;
+                font-weight: 600;
+            }
+            QGroupBox#panelCard {
+                background: #ffffff;
+                border: 1px solid #cfdae8;
+                border-radius: 12px;
+                margin-top: 14px;
+                font-weight: 600;
+                color: #1e2a3a;
+            }
+            QGroupBox#panelCard::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 0 8px 0 8px;
+                color: #2f597e;
+            }
+            QLabel#projectLabel, QLabel#fileInfoLabel {
+                background: #f3f8ff;
+                border: 1px solid #d5e4f8;
+                border-radius: 8px;
+                padding: 8px 10px;
+                color: #1e2a3a;
+                font-weight: 600;
+            }
+            QPushButton {
+                background: #2b71a8;
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #245f8e;
+            }
+            QPushButton:pressed {
+                background: #1f4f75;
+            }
+            QPushButton:disabled {
+                background: #b9c6dd;
+                color: #edf1f8;
+            }
+            QPushButton#primaryActionBtn {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1e8f4f, stop:1 #2fa267);
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QPushButton#primaryActionBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #197843, stop:1 #288d58);
+            }
+            QPushButton#dangerActionBtn {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #c64a34, stop:1 #e35a3f);
+                font-weight: 700;
+            }
+            QPushButton#dangerActionBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #a73f2d, stop:1 #c44c35);
+            }
+            QLineEdit, QComboBox, QListWidget, QPlainTextEdit, QTableWidget {
+                background: #ffffff;
+                border: 1px solid #d3dfef;
+                border-radius: 8px;
+                padding: 5px 8px;
+                selection-background-color: #d6ebff;
+                selection-color: #183655;
+            }
+            QComboBox {
+                min-height: 30px;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 24px;
+            }
+            QLineEdit:focus, QComboBox:focus, QListWidget:focus, QPlainTextEdit:focus, QTableWidget:focus {
+                border: 1px solid #4f87be;
+            }
+            QTableWidget {
+                alternate-background-color: #f8fbff;
+            }
+            QListWidget#filesList::item {
+                border-radius: 6px;
+                padding: 5px 6px;
+                margin: 1px 0;
+            }
+            QListWidget#filesList::item:selected {
+                background: #d6ebff;
+                color: #133252;
+            }
+            QHeaderView::section {
+                background: #e8f1fd;
+                color: #244561;
+                border: none;
+                border-right: 1px solid #d0dff2;
+                border-bottom: 1px solid #d0dff2;
+                padding: 6px 8px;
+                font-weight: 600;
+            }
+            QTableWidget::item {
+                padding: 5px;
+            }
+            QTableWidget::item:selected {
+                background: #d6ebff;
+                color: #0f2d4a;
+            }
+            QPlainTextEdit#logPanel {
+                font-family: Consolas, "Courier New";
+                font-size: 11px;
+                background: #f8fbff;
+            }
+            QProgressBar#mainProgress {
+                border: 1px solid #cfd9ec;
+                border-radius: 8px;
+                background: #ebf0f8;
+                text-align: center;
+                color: #1f3554;
+                font-weight: 600;
+            }
+            QProgressBar#mainProgress::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2f7bb8, stop:1 #2aa38c);
+                border-radius: 7px;
+            }
+            QSplitter::handle {
+                background: #e2ebf7;
+                border-radius: 3px;
+            }
+            QSplitter::handle:hover {
+                background: #cfdcf0;
+            }
+            """
+        )
     
     def update_ui_state(self):
         """Update UI state based on current data."""
         has_project = self.game_path is not None
-        has_file = self.current_file is not None
         has_text = len(self.text_data) > 0
         
         self.extract_text_btn.setEnabled(has_project)
@@ -576,30 +1046,56 @@ class MainWindow(QMainWindow):
         self.restore_btn.setEnabled(has_project)
         self.translate_btn.setEnabled(has_text)
         self.translate_selected_btn.setEnabled(has_text)
+        if has_project:
+            self.statusBar().showMessage("Game loaded. Ready to extract or translate.")
+        else:
+            self.statusBar().showMessage("Ready")
+        self.refresh_file_status_count()
     
     def load_game_directory(self):
         """Load game directory."""
+        start_dir = ""
+        if self.last_open_dir and Path(self.last_open_dir).exists():
+            start_dir = self.last_open_dir
         directory = QFileDialog.getExistingDirectory(
-            self, "Select Game Directory", "",
+            self, "Select Game Directory", start_dir,
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
         )
         
         if directory:
-            game_path = Path(directory)
-            self.game_path = game_path
-            self.project_label.setText(f"Game: {game_path.name}")
-            
-            # Try to auto-detect engine
-            try:
-                engine_info = detect_game_engine(game_path)
-                if engine_info:
-                    self.log(f"Detected game engine: {engine_info['engine']}")
-                else:
-                    self.log("Could not auto-detect game engine")
-            except Exception as e:
-                self.log(f"Error detecting game engine: {e}")
-            
-            self.update_ui_state()
+            self.load_game_directory_from_path(directory)
+
+    def load_game_directory_from_path(self, directory: str):
+        """Load game directory from a specific path."""
+        game_path = Path(directory)
+        self.game_path = game_path
+        self.current_file = None
+        self.text_data = []
+        self.files_list.clear()
+        self.file_filter_input.clear()
+        self.text_table.setRowCount(0)
+        self.file_label.setText("No file loaded")
+        self.last_open_dir = str(game_path)
+        self.settings.setValue("last_game_dir", self.last_open_dir)
+        self.project_label.setText(f"Game: {game_path.name}")
+        
+        # Try to auto-detect engine
+        try:
+            engine_info = detect_game_engine(game_path)
+            if engine_info:
+                self.log(f"Detected game engine: {engine_info['engine']}")
+                if self.status_engine_label is not None:
+                    self.status_engine_label.setText(f"Engine: {engine_info['engine']}")
+            else:
+                self.log("Could not auto-detect game engine")
+                if self.status_engine_label is not None:
+                    self.status_engine_label.setText("Engine: unknown")
+        except Exception as e:
+            self.log(f"Error detecting game engine: {e}")
+            if self.status_engine_label is not None:
+                self.status_engine_label.setText("Engine: error")
+        
+        self.update_ui_state()
     
     def extract_game_text(self):
         """Extract game text in background thread."""
@@ -637,11 +1133,27 @@ class MainWindow(QMainWindow):
             for file_info in extracted_files:
                 item = QListWidgetItem(f"{file_info['type']}: {file_info['path'].name}")
                 item.setData(Qt.UserRole, file_info)  # type: ignore
+                item.setToolTip(str(file_info.get('path', '')))
                 self.files_list.addItem(item)
+            self.filter_extracted_files(self.file_filter_input.text())
         else:
             QMessageBox.critical(self, "Error", "Text extraction failed!")
         
         self.update_ui_state()
+
+    def filter_extracted_files(self, keyword: str):
+        """Filter extracted file list by name/type/path."""
+        query = keyword.strip().lower()
+        for i in range(self.files_list.count()):
+            item = self.files_list.item(i)
+            file_info = item.data(Qt.UserRole)  # type: ignore
+            path_text = ""
+            if isinstance(file_info, dict):
+                path_text = str(file_info.get('path', '')).lower()
+            item_text = item.text().lower()
+            visible = not query or query in item_text or query in path_text
+            item.setHidden(not visible)
+        self.refresh_file_status_count()
     
     def start_one_click_translation(self):
         """触发一键汉化"""
@@ -650,7 +1162,8 @@ class MainWindow(QMainWindow):
             return
             
         reply = QMessageBox.question(self, '一键汉化', 
-                                     '此操作将自动扫描、翻译并替换游戏目录下的所有文本文件。\n（原文件会自动备份为 .backup 后缀）\n\n是否继续？',
+                                     '此操作将按游戏引擎规则自动筛选目标文件并翻译覆盖。\n'
+                                     '系统会自动创建 .backup 备份文件。\n\n是否继续？',
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
         
         if reply == QMessageBox.No:
@@ -666,7 +1179,7 @@ class MainWindow(QMainWindow):
         target_lang = self.target_lang_combo.currentText()
         
         # 启动一键汉化线程
-        self.log("🚀 开始一键汉化...")
+        self.log("开始一键汉化...")
         game_path = self.game_path
         if game_path is None:
             return
@@ -696,6 +1209,7 @@ class MainWindow(QMainWindow):
     def start_restore(self):
         """触发一键恢复"""
         if not self.game_path:
+            QMessageBox.warning(self, "Warning", "No game directory loaded!")
             return
             
         reply = QMessageBox.warning(self, '警告: 一键恢复', 
@@ -725,6 +1239,7 @@ class MainWindow(QMainWindow):
 
     def restore_finished(self, success, message):
         """恢复结束回调"""
+        self.restore_thread = None
         self.restore_btn.setEnabled(True)
         self.one_click_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
@@ -736,9 +1251,9 @@ class MainWindow(QMainWindow):
             self.file_label.setText("No file loaded")
             self.text_data = []
             self.current_file = None
-            self.update_ui_state()
         else:
             QMessageBox.warning(self, "恢复提示", message)
+        self.update_ui_state()
     
     def load_file_for_translation(self, item):
         """Load file for translation using Parser system."""
@@ -944,9 +1459,10 @@ class MainWindow(QMainWindow):
         """Save as new file."""
         if not self.text_data:
             return
+        start_dir = self.last_open_dir if self.last_open_dir and Path(self.last_open_dir).exists() else ""
         
         file_name, _ = QFileDialog.getSaveFileName(
-            self, "Save Translation File", "",
+            self, "Save Translation File", start_dir,
             "JSON Files (*.json);;All Files (*.*)"
         )
         
@@ -993,12 +1509,15 @@ class MainWindow(QMainWindow):
     
     def load_translation_file(self):
         """Load a translation file directly."""
+        start_dir = self.last_open_dir if self.last_open_dir and Path(self.last_open_dir).exists() else ""
         file_name, _ = QFileDialog.getOpenFileName(
-            self, "Open Translation File", "",
+            self, "Open Translation File", start_dir,
             "JSON Files (*.json);;All Files (*.*)"
         )
         
         if file_name:
+            self.last_open_dir = str(Path(file_name).parent)
+            self.settings.setValue("last_game_dir", self.last_open_dir)
             file_info = {
                 'path': Path(file_name),
                 'type': 'Translation File'
@@ -1020,20 +1539,26 @@ class MainWindow(QMainWindow):
         self.project_label.setText("No project loaded")
         self.file_label.setText("No file loaded")
         self.files_list.clear()
+        self.file_filter_input.clear()
         self.text_table.setRowCount(0)
         self.log_text.clear()
+        if self.status_engine_label is not None:
+            self.status_engine_label.setText("Engine: --")
         
         self.update_ui_state()
     
     def open_project(self):
         """Open existing project."""
+        start_dir = ""
+        if self.last_open_dir and Path(self.last_open_dir).exists():
+            start_dir = self.last_open_dir
         directory = QFileDialog.getExistingDirectory(
-            self, "Select Project Directory", "",
+            self, "Select Project Directory", start_dir,
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
         )
         
         if directory:
-            self.load_game_directory()
+            self.load_game_directory_from_path(directory)
     
     def show_settings(self):
         """Show settings dialog."""
@@ -1066,23 +1591,54 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close event."""
-        # Stop any running threads
-        tt = self.translator_thread
-        if tt is not None and tt.isRunning():
-            tt.stop()
-            tt.wait()
-        
-        et = self.extractor_thread
-        if et is not None and et.isRunning():
-            et.terminate()
-            et.wait()
-        
+        self.save_window_state()
+
+        threads = [
+            ("translation", self.translator_thread),
+            ("extract", self.extractor_thread),
+            ("one-click", self.one_click_thread),
+            ("restore", self.restore_thread),
+        ]
+
+        running_threads = []
+        for name, thread in threads:
+            if thread is not None and thread.isRunning():
+                running_threads.append((name, thread))
+
+        for _, thread in running_threads:
+            stop_fn = getattr(thread, "stop", None)
+            if callable(stop_fn):
+                stop_fn()
+
+        for _, thread in running_threads:
+            thread.wait(1200)
+
+        still_running = [(name, thread) for name, thread in running_threads if thread.isRunning()]
+        if still_running:
+            reply = QMessageBox.question(
+                self,
+                "Background tasks still running",
+                "Some background tasks are still running. Force close now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.No:
+                event.ignore()
+                return
+
+            for _, thread in still_running:
+                thread.terminate()
+                thread.wait(600)
+
         event.accept()
 
 
 def main():
     """Main entry point."""
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)  # type: ignore
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)  # type: ignore
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     app.setApplicationName("RPG Game Translator")
     app.setOrganizationName("RPGTranslator")
     

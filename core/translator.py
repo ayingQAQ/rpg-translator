@@ -9,16 +9,27 @@ import time
 import concurrent.futures
 from typing import List, Dict, Any, Optional, Tuple, Callable
 from datetime import datetime
+from pathlib import Path
 
 # Handle imports for both package and direct execution
 try:
     from ..parsers import get_parser, BaseParser, TextSegment, get_supported_formats  # type: ignore
     from ..translators import get_translator, BaseTranslator  # type: ignore
+    from ..game_extractors import (  # type: ignore
+        is_irrelevant_text_file,
+        should_skip_dir_name,
+        MAX_TEXT_FILE_SIZE,
+    )
 except ImportError:
     # Direct execution
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from parsers import get_parser, BaseParser, TextSegment, get_supported_formats  # type: ignore
     from translators import get_translator, BaseTranslator  # type: ignore
+    from game_extractors import (  # type: ignore
+        is_irrelevant_text_file,
+        should_skip_dir_name,
+        MAX_TEXT_FILE_SIZE,
+    )
 
 
 class GameTranslator:
@@ -215,7 +226,7 @@ class GameTranslator:
             output_dir = self.output_dir
         
         # Find all files
-        input_files = self._find_files(input_dir, extensions, recursive)
+        input_files = self._find_files(input_dir, extensions, recursive, output_dir=output_dir)
         
         print(f"\nFound {len(input_files)} files to translate")
         
@@ -466,32 +477,66 @@ class GameTranslator:
         self,
         directory: str,
         extensions: List[str],
-        recursive: bool
+        recursive: bool,
+        output_dir: Optional[str] = None
     ) -> List[str]:
-        """Find all files with specified extensions with basic safety filtering."""
-        files = []
-        skip_dirs = {'img', 'images', 'graphics', 'audio', 'sound', 'music', 'movies', 'video', 'save', 'saves'}
-        
-        for root, dirs, filenames in os.walk(directory):
-            # Modify dirs in-place to skip irrelevant directories early
-            filtered = [d for d in dirs if str(d).lower() not in skip_dirs]
-            dirs.clear()
-            dirs.extend(filtered)
-            
+        """Find all files with specified extensions using unified filtering."""
+        files: List[str] = []
+        input_root = Path(directory).resolve()
+
+        def _normalize_extension(ext: str) -> str:
+            normalized = ext.strip().lower().lstrip('*')
+            if not normalized.startswith('.'):
+                normalized = f".{normalized}"
+            return normalized
+
+        normalized_extensions = {_normalize_extension(ext) for ext in extensions}
+
+        output_root: Optional[Path] = None
+        if output_dir:
+            output_root = Path(output_dir).resolve()
+
+        def _is_under(path: Path, parent: Path) -> bool:
+            try:
+                path.resolve().relative_to(parent.resolve())
+                return True
+            except ValueError:
+                return False
+
+        for root, dirs, filenames in os.walk(str(input_root)):
+            root_path = Path(root)
+
+            filtered_dirs: List[str] = []
+            for dir_name in dirs:
+                dir_path = root_path / dir_name
+                if should_skip_dir_name(dir_name):
+                    continue
+                if output_root and output_root != input_root and _is_under(dir_path, output_root):
+                    continue
+                filtered_dirs.append(dir_name)
+            dirs[:] = filtered_dirs
+
             for filename in filenames:
                 ext = os.path.splitext(filename)[1].lower()
-                if ext in extensions:
-                    file_path = os.path.join(root, filename)
-                    try:
-                        # Skip files that are > 10MB to avoid parsing huge assets
-                        if os.path.getsize(file_path) <= 10 * 1024 * 1024:
-                            files.append(file_path)
-                    except OSError:
-                        pass
-            
+                if ext not in normalized_extensions:
+                    continue
+
+                file_path = root_path / filename
+
+                if output_root and output_root != input_root and _is_under(file_path, output_root):
+                    continue
+                if is_irrelevant_text_file(file_path, input_root):
+                    continue
+
+                try:
+                    if file_path.stat().st_size <= MAX_TEXT_FILE_SIZE:
+                        files.append(str(file_path))
+                except OSError:
+                    continue
+
             if not recursive:
                 break
-        
+
         return files
     
     def _print_summary(self):
