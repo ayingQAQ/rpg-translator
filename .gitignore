@@ -144,9 +144,21 @@ cython_debug/
 # Output files
 output/
 translation_log.json
+test_output.txt
+
+# Local agent/editor generated files
+.codex/
+commit_message.txt
 
 # Backup files
 *.backup_*
+*.backup.yaml
+*.backup.json
+
+# Local scratch/test scripts
+tests/
+test_*.py
+delete_test_data.py
 
 # OS files
 .DS_Store
