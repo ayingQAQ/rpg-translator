@@ -48,6 +48,114 @@ except ImportError:
     from game_extractors import detect_game_engine, extract_game_text, convert_to_translation_format, save_translated_file  # type: ignore
 
 
+UI_TEXT = {
+    "zh": {
+        "window_title": "RPG 游戏翻译器",
+        "hero_title": "RPG 翻译工作台",
+        "hero_subtitle": "引擎感知提取与精准批量翻译",
+        "hero_hint": "提示：一键汉化只处理引擎命中的候选文件",
+        "project": "项目",
+        "no_project": "未加载项目",
+        "load_game": "加载游戏目录",
+        "one_click": "一键汉化",
+        "restore": "一键恢复",
+        "files": "已提取文件",
+        "filter_files": "按名称或类型筛选文件…",
+        "file_tooltip": "双击文件以加载提取的文本",
+        "extract": "提取游戏文本",
+        "no_file": "未加载文件",
+        "translation_settings": "翻译设置",
+        "engine": "引擎：",
+        "from": "源语言：",
+        "to": "目标语言：",
+        "translate_all": "翻译全部",
+        "translate_selected": "翻译选中项",
+        "log": "日志",
+        "log_hint": "运行日志将显示在这里…",
+        "file_menu": "文件",
+        "tools_menu": "工具",
+        "help_menu": "帮助",
+        "new_project": "新建项目",
+        "open_project": "打开项目",
+        "load_translation_file": "加载翻译文件",
+        "save": "保存",
+        "save_as": "另存为…",
+        "exit": "退出",
+        "settings": "设置",
+        "about": "关于",
+        "toolbar": "主工具栏",
+        "new": "新建",
+        "open": "打开",
+        "language": "English",
+        "ready": "就绪",
+        "game_loaded": "游戏已加载，可以提取或翻译文本。",
+        "engine_status": "引擎：{engine}",
+        "files_status": "文件：{count}",
+        "processing": "处理中… {current}/{total}",
+        "progress": "处理中 %p%",
+        "game": "游戏：{name}",
+        "file": "文件：{name} — {count} 条",
+        "table_headers": ["位置", "原文", "译文", "状态"],
+        "pending": "待翻译",
+        "translated": "已翻译",
+        "review": "待确认",
+        "error": "错误",
+    },
+    "en": {
+        "window_title": "RPG Game Translator",
+        "hero_title": "RPG Translation Studio",
+        "hero_subtitle": "Engine-aware extraction and precise batch translation",
+        "hero_hint": "Tip: One-click translation only handles engine-matched candidate files",
+        "project": "Project",
+        "no_project": "No project loaded",
+        "load_game": "Load Game Directory",
+        "one_click": "Translate Game",
+        "restore": "Restore Original",
+        "files": "Extracted Files",
+        "filter_files": "Filter files by name or type…",
+        "file_tooltip": "Double-click a file to load extracted text",
+        "extract": "Extract Game Text",
+        "no_file": "No file loaded",
+        "translation_settings": "Translation Settings",
+        "engine": "Engine:",
+        "from": "From:",
+        "to": "To:",
+        "translate_all": "Translate All",
+        "translate_selected": "Translate Selected",
+        "log": "Log",
+        "log_hint": "Runtime logs appear here…",
+        "file_menu": "File",
+        "tools_menu": "Tools",
+        "help_menu": "Help",
+        "new_project": "New Project",
+        "open_project": "Open Project",
+        "load_translation_file": "Load Translation File",
+        "save": "Save",
+        "save_as": "Save As…",
+        "exit": "Exit",
+        "settings": "Settings",
+        "about": "About",
+        "toolbar": "Main Toolbar",
+        "new": "New",
+        "open": "Open",
+        "language": "中文",
+        "ready": "Ready",
+        "game_loaded": "Game loaded. Ready to extract or translate.",
+        "engine_status": "Engine: {engine}",
+        "files_status": "Files: {count}",
+        "processing": "Processing… {current}/{total}",
+        "progress": "Processing %p%",
+        "game": "Game: {name}",
+        "file": "File: {name} — {count} entries",
+        "table_headers": ["Key", "Original Text", "Translated Text", "Status"],
+        "pending": "Pending",
+        "translated": "Translated",
+        "review": "Review",
+        "error": "Error",
+    },
+}
+
+
 class TranslationThread(QThread):
     """Worker thread for translation to keep GUI responsive."""
     
@@ -381,8 +489,9 @@ class TextTableWidget(QTableWidget):
     
     def __init__(self):
         super().__init__()
+        self.language = "zh"
         self.setColumnCount(4)
-        self.setHorizontalHeaderLabels(["Key", "Original Text", "Translated Text", "Status"])
+        self.setHorizontalHeaderLabels(UI_TEXT[self.language]["table_headers"])
         header = self.horizontalHeader()
         if header is not None:
             header.setStretchLastSection(False)
@@ -398,6 +507,33 @@ class TextTableWidget(QTableWidget):
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setSortingEnabled(True)
+
+    def set_language(self, language: str):
+        """Update visible table labels while preserving the machine-readable status."""
+        self.language = language if language in UI_TEXT else "zh"
+        self.setHorizontalHeaderLabels(UI_TEXT[self.language]["table_headers"])
+        for row in range(self.rowCount()):
+            item = self.item(row, 3)
+            if item is None:
+                continue
+            status = item.data(Qt.UserRole) or "pending"  # type: ignore
+            item.setText(self.status_text(str(status)))
+
+    def status_text(self, status: str) -> str:
+        return str(UI_TEXT[self.language].get(status, status))
+
+    def set_status(self, item: QTableWidgetItem, status: str):
+        """Set a localized status label without changing the stored status value."""
+        item.setData(Qt.UserRole, status)  # type: ignore
+        item.setText(self.status_text(status))
+        colors = {
+            "translated": QColor(200, 255, 200),
+            "pending": QColor(255, 255, 200),
+            "review": QColor(255, 225, 170),
+            "error": QColor(255, 200, 200),
+        }
+        if status in colors:
+            item.setBackground(colors[status])
     
     def load_text_data(self, text_data: List[Dict]):
         """Load text data into table."""
@@ -428,18 +564,9 @@ class TextTableWidget(QTableWidget):
             
             # Status
             status = item.get('status', 'pending')
-            status_item = QTableWidgetItem(status)
+            status_item = QTableWidgetItem()
             status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)  # type: ignore
-            
-            # Color code status
-            if status == 'translated':
-                status_item.setBackground(QColor(200, 255, 200))  # Light green
-            elif status == 'pending':
-                status_item.setBackground(QColor(255, 255, 200))  # Light yellow
-            elif status == 'review':
-                status_item.setBackground(QColor(255, 225, 170))  # Light orange
-            elif status == 'error':
-                status_item.setBackground(QColor(255, 200, 200))  # Light red
+            self.set_status(status_item, status)
             
             self.setItem(row, 3, status_item)
         if was_sorting_enabled:
@@ -457,7 +584,7 @@ class TextTableWidget(QTableWidget):
                 'key': item0.text() if item0 else '',
                 'original': item1.text() if item1 else '',
                 'translated': item2.text() if item2 else '',
-                'status': item3.text() if item3 else 'pending'
+                'status': (item3.data(Qt.UserRole) if item3 else None) or 'pending'  # type: ignore
             })
         return data
 
@@ -467,10 +594,12 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RPG Game Translator")
         self.setGeometry(100, 100, 1200, 800)
         self.setMinimumSize(1080, 720)
         self.settings = QSettings("RPGTranslator", "RPG Game Translator")
+        self.ui_language = str(self.settings.value("ui_language", "zh"))
+        if self.ui_language not in UI_TEXT:
+            self.ui_language = "zh"
         try:
             self.app_config = load_config()
         except ValueError as exc:
@@ -492,6 +621,7 @@ class MainWindow(QMainWindow):
         self.current_parser: Optional[BaseParser] = None
         self.status_engine_label: Optional[QLabel] = None
         self.status_files_label: Optional[QLabel] = None
+        self.current_engine = "--"
         
         # Setup UI
         self.setup_ui()
@@ -499,6 +629,7 @@ class MainWindow(QMainWindow):
         self.setup_toolbar()
         self.setup_statusbar()
         self.apply_visual_theme()
+        self.apply_language()
         self.restore_window_state()
         
         # Update UI state
@@ -542,7 +673,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setObjectName("mainProgress")
         self.progress_bar.setFixedHeight(18)
         self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFormat("Processing %p%")
+        self.progress_bar.setFormat(self.t("progress"))
         self.progress_bar.setVisible(False)
         main_layout.addWidget(self.progress_bar)
 
@@ -559,19 +690,19 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(2)
 
-        title = QLabel("RPG 翻译工作台")
-        title.setObjectName("heroTitle")
-        subtitle = QLabel("引擎感知提取 + 精准批量翻译流程")
-        subtitle.setObjectName("heroSubtitle")
-        left_layout.addWidget(title)
-        left_layout.addWidget(subtitle)
+        self.hero_title = QLabel()
+        self.hero_title.setObjectName("heroTitle")
+        self.hero_subtitle = QLabel()
+        self.hero_subtitle.setObjectName("heroSubtitle")
+        left_layout.addWidget(self.hero_title)
+        left_layout.addWidget(self.hero_subtitle)
 
-        hint = QLabel("提示：一键汉化只处理引擎命中的候选文件")
-        hint.setObjectName("heroHint")
-        hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # type: ignore
+        self.hero_hint = QLabel()
+        self.hero_hint.setObjectName("heroHint")
+        self.hero_hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # type: ignore
 
         banner_layout.addWidget(left_wrap, 1)
-        banner_layout.addWidget(hint, 1)
+        banner_layout.addWidget(self.hero_hint, 1)
         return banner
     
     def create_left_panel(self):
@@ -582,23 +713,23 @@ class MainWindow(QMainWindow):
         left_layout.setSpacing(10)
         
         # Project info group
-        project_group = QGroupBox("Project")
-        project_group.setObjectName("panelCard")
+        self.project_group = QGroupBox()
+        self.project_group.setObjectName("panelCard")
         project_layout = QVBoxLayout()
         project_layout.setSpacing(8)
         
-        self.project_label = QLabel("No project loaded")
+        self.project_label = QLabel()
         self.project_label.setObjectName("projectLabel")
         self.project_label.setWordWrap(True)
         project_layout.addWidget(self.project_label)
         
-        self.load_game_btn = QPushButton("Load Game Directory")
+        self.load_game_btn = QPushButton()
         self.load_game_btn.setMinimumHeight(36)
         self.load_game_btn.clicked.connect(self.load_game_directory)
         project_layout.addWidget(self.load_game_btn)
         
         # One-click translation action
-        self.one_click_btn = QPushButton("一键汉化 (Mtool 模式)")
+        self.one_click_btn = QPushButton()
         self.one_click_btn.setMinimumHeight(48)
         self.one_click_btn.setObjectName("primaryActionBtn")
         self.one_click_btn.clicked.connect(self.start_one_click_translation)
@@ -606,25 +737,24 @@ class MainWindow(QMainWindow):
         project_layout.addWidget(self.one_click_btn)
         
         # Restore action
-        self.restore_btn = QPushButton("一键恢复 (还原原版)")
+        self.restore_btn = QPushButton()
         self.restore_btn.setMinimumHeight(40)
         self.restore_btn.setObjectName("dangerActionBtn")
         self.restore_btn.clicked.connect(self.start_restore)
         self.restore_btn.setEnabled(False) 
         project_layout.addWidget(self.restore_btn)
         
-        project_group.setLayout(project_layout)
-        self.apply_card_shadow(project_group)
-        left_layout.addWidget(project_group)
+        self.project_group.setLayout(project_layout)
+        self.apply_card_shadow(self.project_group)
+        left_layout.addWidget(self.project_group)
         
         # Extracted files list
-        files_group = QGroupBox("Extracted Files")
-        files_group.setObjectName("panelCard")
+        self.files_group = QGroupBox()
+        self.files_group.setObjectName("panelCard")
         files_layout = QVBoxLayout()
         files_layout.setSpacing(8)
 
         self.file_filter_input = QLineEdit()
-        self.file_filter_input.setPlaceholderText("Filter files by name or type...")
         self.file_filter_input.textChanged.connect(self.filter_extracted_files)
         files_layout.addWidget(self.file_filter_input)
         
@@ -632,19 +762,18 @@ class MainWindow(QMainWindow):
         self.files_list.setObjectName("filesList")
         self.files_list.setAlternatingRowColors(True)
         self.files_list.setUniformItemSizes(True)
-        self.files_list.setToolTip("Double-click a file to load extracted text")
         self.files_list.itemDoubleClicked.connect(self.load_file_for_translation)
         files_layout.addWidget(self.files_list)
         
-        self.extract_text_btn = QPushButton("Extract Game Text")
+        self.extract_text_btn = QPushButton()
         self.extract_text_btn.setMinimumHeight(34)
         self.extract_text_btn.clicked.connect(self.extract_game_text)
         self.extract_text_btn.setEnabled(False)
         files_layout.addWidget(self.extract_text_btn)
         
-        files_group.setLayout(files_layout)
-        self.apply_card_shadow(files_group)
-        left_layout.addWidget(files_group)
+        self.files_group.setLayout(files_layout)
+        self.apply_card_shadow(self.files_group)
+        left_layout.addWidget(self.files_group)
         
         return left_widget
     
@@ -656,7 +785,7 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(10)
         
         # File info
-        self.file_label = QLabel("No file loaded")
+        self.file_label = QLabel()
         self.file_label.setObjectName("fileInfoLabel")
         self.file_label.setMinimumHeight(34)
         right_layout.addWidget(self.file_label)
@@ -666,13 +795,14 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.text_table)
         
         # Translation controls
-        controls_group = QGroupBox("Translation Settings")
-        controls_group.setObjectName("panelCard")
+        self.controls_group = QGroupBox()
+        self.controls_group.setObjectName("panelCard")
         controls_layout = QHBoxLayout()
         controls_layout.setSpacing(8)
         
         # Translation engine
-        controls_layout.addWidget(QLabel("Engine:"))
+        self.engine_caption = QLabel()
+        controls_layout.addWidget(self.engine_caption)
         self.engine_combo = QComboBox()
         engines = get_available_engines()
         for engine in engines:
@@ -680,46 +810,47 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.engine_combo)
         
         # Source language
-        controls_layout.addWidget(QLabel("From:"))
+        self.source_caption = QLabel()
+        controls_layout.addWidget(self.source_caption)
         self.source_lang_combo = QComboBox()
         self.source_lang_combo.addItems(['auto', 'en', 'ja', 'ko'])
         controls_layout.addWidget(self.source_lang_combo)
         
         # Target language
-        controls_layout.addWidget(QLabel("To:"))
+        self.target_caption = QLabel()
+        controls_layout.addWidget(self.target_caption)
         self.target_lang_combo = QComboBox()
         self.target_lang_combo.addItems(['zh-CN', 'zh-TW', 'en', 'ja', 'ko'])
         controls_layout.addWidget(self.target_lang_combo)
         
         # Buttons
-        self.translate_btn = QPushButton("Translate All")
+        self.translate_btn = QPushButton()
         self.translate_btn.clicked.connect(self.translate_all)
         self.translate_btn.setEnabled(False)
         controls_layout.addWidget(self.translate_btn)
         
-        self.translate_selected_btn = QPushButton("Translate Selected")
+        self.translate_selected_btn = QPushButton()
         self.translate_selected_btn.clicked.connect(self.translate_selected)
         self.translate_selected_btn.setEnabled(False)
         controls_layout.addWidget(self.translate_selected_btn)
         
-        controls_group.setLayout(controls_layout)
-        self.apply_card_shadow(controls_group)
-        right_layout.addWidget(controls_group)
+        self.controls_group.setLayout(controls_layout)
+        self.apply_card_shadow(self.controls_group)
+        right_layout.addWidget(self.controls_group)
         
         # Log output
-        log_group = QGroupBox("Log")
-        log_group.setObjectName("panelCard")
+        self.log_group = QGroupBox()
+        self.log_group.setObjectName("panelCard")
         log_layout = QVBoxLayout()
         self.log_text = QPlainTextEdit()
         self.log_text.setObjectName("logPanel")
         self.log_text.setReadOnly(True)
-        self.log_text.setPlaceholderText("Runtime logs appear here...")
         self.log_text.setMaximumBlockCount(1500)
         self.log_text.setMaximumHeight(150)
         log_layout.addWidget(self.log_text)
-        log_group.setLayout(log_layout)
-        self.apply_card_shadow(log_group)
-        right_layout.addWidget(log_group)
+        self.log_group.setLayout(log_layout)
+        self.apply_card_shadow(self.log_group)
+        right_layout.addWidget(self.log_group)
         
         return right_widget
     
@@ -730,87 +861,161 @@ class MainWindow(QMainWindow):
             return
         
         # File menu
-        file_menu = menubar.addMenu("File")
+        self.file_menu = menubar.addMenu("")
         
-        new_action = QAction("New Project", self)
-        new_action.triggered.connect(self.new_project)  # type: ignore
-        file_menu.addAction(new_action)
+        self.new_project_action = QAction(self)
+        self.new_project_action.triggered.connect(self.new_project)  # type: ignore
+        self.file_menu.addAction(self.new_project_action)
         
-        open_action = QAction("Open Project", self)
-        open_action.triggered.connect(self.open_project)  # type: ignore
-        file_menu.addAction(open_action)
+        self.open_project_action = QAction(self)
+        self.open_project_action.triggered.connect(self.open_project)  # type: ignore
+        self.file_menu.addAction(self.open_project_action)
         
-        file_menu.addSeparator()
+        self.file_menu.addSeparator()
         
-        load_file_action = QAction("Load Translation File", self)
-        load_file_action.triggered.connect(self.load_translation_file)  # type: ignore
-        file_menu.addAction(load_file_action)
+        self.load_file_action = QAction(self)
+        self.load_file_action.triggered.connect(self.load_translation_file)  # type: ignore
+        self.file_menu.addAction(self.load_file_action)
         
-        save_action = QAction("Save", self)
-        save_action.triggered.connect(self.save_file)  # type: ignore
-        save_action.setShortcut("Ctrl+S")
-        file_menu.addAction(save_action)
+        self.save_action = QAction(self)
+        self.save_action.triggered.connect(self.save_file)  # type: ignore
+        self.save_action.setShortcut("Ctrl+S")
+        self.file_menu.addAction(self.save_action)
         
-        save_as_action = QAction("Save As...", self)
-        save_as_action.triggered.connect(self.save_file_as)  # type: ignore
-        file_menu.addAction(save_as_action)
+        self.save_as_action = QAction(self)
+        self.save_as_action.triggered.connect(self.save_file_as)  # type: ignore
+        self.file_menu.addAction(self.save_as_action)
         
-        file_menu.addSeparator()
+        self.file_menu.addSeparator()
         
-        exit_action = QAction("Exit", self)
-        exit_action.triggered.connect(self.close)  # type: ignore
-        file_menu.addAction(exit_action)
+        self.exit_action = QAction(self)
+        self.exit_action.triggered.connect(self.close)  # type: ignore
+        self.file_menu.addAction(self.exit_action)
         
         # Tools menu
-        tools_menu = menubar.addMenu("Tools")
+        self.tools_menu = menubar.addMenu("")
         
-        settings_action = QAction("Settings", self)
-        settings_action.triggered.connect(self.show_settings)  # type: ignore
-        tools_menu.addAction(settings_action)
+        self.settings_action = QAction(self)
+        self.settings_action.triggered.connect(self.show_settings)  # type: ignore
+        self.tools_menu.addAction(self.settings_action)
         
         # Help menu
-        help_menu = menubar.addMenu("Help")
+        self.help_menu = menubar.addMenu("")
         
-        about_action = QAction("About", self)
-        about_action.triggered.connect(self.show_about)  # type: ignore
-        help_menu.addAction(about_action)
+        self.about_action = QAction(self)
+        self.about_action.triggered.connect(self.show_about)  # type: ignore
+        self.help_menu.addAction(self.about_action)
     
     def setup_toolbar(self):
         """Setup toolbar."""
-        toolbar = QToolBar("Main Toolbar")
-        toolbar.setMovable(False)
-        toolbar.setFloatable(False)
-        toolbar.setIconSize(toolbar.iconSize())
-        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)  # type: ignore
-        self.addToolBar(toolbar)
-        
+        self.toolbar = QToolBar()
+        self.toolbar.setMovable(False)
+        self.toolbar.setFloatable(False)
+        self.toolbar.setIconSize(self.toolbar.iconSize())
+        self.toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)  # type: ignore
+        self.addToolBar(self.toolbar)
+
         # Add actions
-        new_action = QAction("New", self)
-        new_action.triggered.connect(self.new_project)
-        toolbar.addAction(new_action)
-        
-        open_action = QAction("Open", self)
-        open_action.triggered.connect(self.open_project)
-        toolbar.addAction(open_action)
-        
-        toolbar.addSeparator()
-        
-        save_action = QAction("Save", self)
-        save_action.triggered.connect(self.save_file)
-        toolbar.addAction(save_action)
+        self.toolbar_new_action = QAction(self)
+        self.toolbar_new_action.triggered.connect(self.new_project)
+        self.toolbar.addAction(self.toolbar_new_action)
+
+        self.toolbar_open_action = QAction(self)
+        self.toolbar_open_action.triggered.connect(self.open_project)
+        self.toolbar.addAction(self.toolbar_open_action)
+
+        self.toolbar.addSeparator()
+
+        self.toolbar_save_action = QAction(self)
+        self.toolbar_save_action.triggered.connect(self.save_file)
+        self.toolbar.addAction(self.toolbar_save_action)
+        self.toolbar.addSeparator()
+        self.language_toggle_btn = QPushButton()
+        self.language_toggle_btn.setObjectName("languageToggleBtn")
+        self.language_toggle_btn.clicked.connect(self.toggle_language)
+        self.toolbar.addWidget(self.language_toggle_btn)
     
     def setup_statusbar(self):
         """Setup status bar."""
         status_bar = self.statusBar()
         status_bar.setSizeGripEnabled(False)
-        status_bar.showMessage("Ready")
+        status_bar.showMessage(self.t("ready"))
 
-        self.status_engine_label = QLabel("Engine: --")
-        self.status_files_label = QLabel("Files: 0")
+        self.status_engine_label = QLabel()
+        self.status_files_label = QLabel()
         self.status_engine_label.setObjectName("statusPill")
         self.status_files_label.setObjectName("statusPill")
         status_bar.addPermanentWidget(self.status_engine_label)
         status_bar.addPermanentWidget(self.status_files_label)
+
+    def t(self, key: str, **values: Any) -> str:
+        """Return a localized UI string."""
+        text = UI_TEXT[self.ui_language].get(key, key)
+        return str(text).format(**values)
+
+    def set_engine_status(self, engine: str):
+        """Keep the engine value independent of the visible language."""
+        self.current_engine = engine
+        if self.status_engine_label is not None:
+            self.status_engine_label.setText(self.t("engine_status", engine=engine))
+
+    def apply_language(self):
+        """Apply one language consistently to the visible application chrome."""
+        self.setWindowTitle(self.t("window_title"))
+        self.hero_title.setText(self.t("hero_title"))
+        self.hero_subtitle.setText(self.t("hero_subtitle"))
+        self.hero_hint.setText(self.t("hero_hint"))
+        self.project_group.setTitle(self.t("project"))
+        self.files_group.setTitle(self.t("files"))
+        self.controls_group.setTitle(self.t("translation_settings"))
+        self.log_group.setTitle(self.t("log"))
+        self.load_game_btn.setText(self.t("load_game"))
+        self.one_click_btn.setText(self.t("one_click"))
+        self.restore_btn.setText(self.t("restore"))
+        self.extract_text_btn.setText(self.t("extract"))
+        self.file_filter_input.setPlaceholderText(self.t("filter_files"))
+        self.files_list.setToolTip(self.t("file_tooltip"))
+        self.engine_caption.setText(self.t("engine"))
+        self.source_caption.setText(self.t("from"))
+        self.target_caption.setText(self.t("to"))
+        self.translate_btn.setText(self.t("translate_all"))
+        self.translate_selected_btn.setText(self.t("translate_selected"))
+        self.log_text.setPlaceholderText(self.t("log_hint"))
+        self.file_menu.setTitle(self.t("file_menu"))
+        self.tools_menu.setTitle(self.t("tools_menu"))
+        self.help_menu.setTitle(self.t("help_menu"))
+        self.new_project_action.setText(self.t("new_project"))
+        self.open_project_action.setText(self.t("open_project"))
+        self.load_file_action.setText(self.t("load_translation_file"))
+        self.save_action.setText(self.t("save"))
+        self.save_as_action.setText(self.t("save_as"))
+        self.exit_action.setText(self.t("exit"))
+        self.settings_action.setText(self.t("settings"))
+        self.about_action.setText(self.t("about"))
+        self.toolbar.setWindowTitle(self.t("toolbar"))
+        self.toolbar_new_action.setText(self.t("new"))
+        self.toolbar_open_action.setText(self.t("open"))
+        self.toolbar_save_action.setText(self.t("save"))
+        self.language_toggle_btn.setText(self.t("language"))
+        self.progress_bar.setFormat(self.t("progress"))
+        self.text_table.set_language(self.ui_language)
+        self.set_engine_status(self.current_engine)
+        if self.game_path is None:
+            self.project_label.setText(self.t("no_project"))
+        else:
+            self.project_label.setText(self.t("game", name=self.game_path.name))
+        if self.current_file is None:
+            self.file_label.setText(self.t("no_file"))
+        else:
+            self.file_label.setText(self.t("file", name=self.current_file.name, count=len(self.text_data)))
+        self.refresh_file_status_count()
+
+    def toggle_language(self):
+        """Switch the entire application UI between Chinese and English."""
+        self.ui_language = "en" if self.ui_language == "zh" else "zh"
+        self.settings.setValue("ui_language", self.ui_language)
+        self.apply_language()
+        self.update_ui_state()
 
     def restore_window_state(self):
         """Restore persisted window geometry and splitter sizes."""
@@ -848,9 +1053,9 @@ class MainWindow(QMainWindow):
         total = self.files_list.count()
         visible = self.visible_file_count()
         if visible != total:
-            self.status_files_label.setText(f"Files: {visible}/{total}")
+            self.status_files_label.setText(self.t("files_status", count=f"{visible}/{total}"))
         else:
-            self.status_files_label.setText(f"Files: {total}")
+            self.status_files_label.setText(self.t("files_status", count=total))
 
     def apply_card_shadow(self, widget):
         """Apply subtle depth to card-like panels."""
@@ -933,6 +1138,17 @@ class MainWindow(QMainWindow):
             QToolButton:hover {
                 background: #e9f2ff;
                 border-color: #c8daff;
+            }
+            QPushButton#languageToggleBtn {
+                background: #edf4ff;
+                color: #173a63;
+                border: 1px solid #c8daff;
+                border-radius: 8px;
+                padding: 5px 10px;
+            }
+            QPushButton#languageToggleBtn:hover {
+                background: #dceaff;
+                border-color: #9dbce7;
             }
             QStatusBar {
                 background: #ffffff;
@@ -1087,9 +1303,9 @@ class MainWindow(QMainWindow):
         self.translate_btn.setEnabled(has_text)
         self.translate_selected_btn.setEnabled(has_text)
         if has_project:
-            self.statusBar().showMessage("Game loaded. Ready to extract or translate.")
+            self.statusBar().showMessage(self.t("game_loaded"))
         else:
-            self.statusBar().showMessage("Ready")
+            self.statusBar().showMessage(self.t("ready"))
         self.refresh_file_status_count()
     
     def load_game_directory(self):
@@ -1114,10 +1330,10 @@ class MainWindow(QMainWindow):
         self.files_list.clear()
         self.file_filter_input.clear()
         self.text_table.setRowCount(0)
-        self.file_label.setText("No file loaded")
+        self.file_label.setText(self.t("no_file"))
         self.last_open_dir = str(game_path)
         self.settings.setValue("last_game_dir", self.last_open_dir)
-        self.project_label.setText(f"Game: {game_path.name}")
+        self.project_label.setText(self.t("game", name=game_path.name))
         
         # Try to auto-detect engine
         try:
@@ -1125,15 +1341,15 @@ class MainWindow(QMainWindow):
             if engine_info:
                 self.log(f"Detected game engine: {engine_info['engine']}")
                 if self.status_engine_label is not None:
-                    self.status_engine_label.setText(f"Engine: {engine_info['engine']}")
+                    self.set_engine_status(engine_info['engine'])
             else:
                 self.log("Could not auto-detect game engine")
                 if self.status_engine_label is not None:
-                    self.status_engine_label.setText("Engine: unknown")
+                    self.set_engine_status("unknown")
         except Exception as e:
             self.log(f"Error detecting game engine: {e}")
             if self.status_engine_label is not None:
-                self.status_engine_label.setText("Engine: error")
+                self.set_engine_status("error")
         
         self.update_ui_state()
     
@@ -1288,7 +1504,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "恢复成功", message)
             # 如果右侧正打开着某个文件，最好刷新一下或者清空，防止数据不一致
             self.text_table.setRowCount(0)
-            self.file_label.setText("No file loaded")
+            self.file_label.setText(self.t("no_file"))
             self.text_data = []
             self.current_file = None
         else:
@@ -1330,7 +1546,7 @@ class MainWindow(QMainWindow):
             
             self.current_file = file_path
             self.current_parser: Optional[BaseParser] = parser  # type: ignore  # Store parser for save operation
-            self.file_label.setText(f"File: {file_path.name} ({len(self.text_data)} entries)")
+            self.file_label.setText(self.t("file", name=file_path.name, count=len(self.text_data)))
             
             # Load into table
             self.text_table.load_text_data(self.text_data)
@@ -1445,11 +1661,9 @@ class MainWindow(QMainWindow):
                 try:
                     translated = translator.translate(original)
                     item2.setText(translated)
-                    item3.setText('translated')
-                    item3.setBackground(QColor(200, 255, 200))
+                    self.text_table.set_status(item3, 'translated')
                 except Exception as e:
-                    item3.setText('error')
-                    item3.setBackground(QColor(255, 200, 200))
+                    self.text_table.set_status(item3, 'error')
                     self.log_error(f"Error translating '{original}': {e}")
             
             self.progress_bar.setValue(i + 1)
@@ -1462,7 +1676,7 @@ class MainWindow(QMainWindow):
         """Update progress bar."""
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
-        self.statusBar().showMessage(f"Processing... {current}/{total}")
+        self.statusBar().showMessage(self.t("processing", current=current, total=total))
     
     def translation_finished(self, success, message):
         """Handle translation completion."""
@@ -1603,14 +1817,13 @@ class MainWindow(QMainWindow):
         self.game_path = None
         self.current_file = None
         
-        self.project_label.setText("No project loaded")
-        self.file_label.setText("No file loaded")
+        self.project_label.setText(self.t("no_project"))
+        self.file_label.setText(self.t("no_file"))
         self.files_list.clear()
         self.file_filter_input.clear()
         self.text_table.setRowCount(0)
         self.log_text.clear()
-        if self.status_engine_label is not None:
-            self.status_engine_label.setText("Engine: --")
+        self.set_engine_status("--")
         
         self.update_ui_state()
     
