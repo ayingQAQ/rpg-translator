@@ -19,7 +19,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
 # Import modules directly
-from core.translator import GameTranslator
+from core import GameTranslator, load_config
 from parsers import get_supported_formats
 from translators import get_available_engines
 
@@ -67,30 +67,30 @@ Examples:
     translate_parser.add_argument(
         '-e', '--engine',
         choices=get_available_engines(),
-        default='google',
-        help='Translation engine (default: google)'
+        default=None,
+        help='Translation engine (defaults to config.yaml or google)'
     )
     translate_parser.add_argument(
         '-s', '--source',
-        default='auto',
-        help='Source language code (default: auto-detect)'
+        default=None,
+        help='Source language code (defaults to config.yaml or auto-detect)'
     )
     translate_parser.add_argument(
         '-t', '--target',
-        default='zh-CN',
-        help='Target language code (default: zh-CN)'
+        default=None,
+        help='Target language code (defaults to config.yaml or zh-CN)'
     )
     translate_parser.add_argument(
         '--delay',
         type=float,
-        default=0.5,
-        help='Delay between API requests in seconds (default: 0.5)'
+        default=None,
+        help='Delay between API requests in seconds (defaults to config.yaml)'
     )
     translate_parser.add_argument(
         '--batch-size',
         type=int,
-        default=50,
-        help='Texts per batch (default: 50)'
+        default=None,
+        help='Texts per batch (defaults to config.yaml)'
     )
     translate_parser.add_argument(
         '--no-backup',
@@ -99,8 +99,8 @@ Examples:
     )
     translate_parser.add_argument(
         '--output-dir',
-        default='./output',
-        help='Output directory (default: ./output)'
+        default=None,
+        help='Output directory (defaults to config.yaml or ./output)'
     )
     
     # ========== Batch Command ==========
@@ -119,18 +119,18 @@ Examples:
     batch_parser.add_argument(
         '-e', '--engine',
         choices=get_available_engines(),
-        default='google',
-        help='Translation engine (default: google)'
+        default=None,
+        help='Translation engine (defaults to config.yaml or google)'
     )
     batch_parser.add_argument(
         '-s', '--source',
-        default='auto',
-        help='Source language code (default: auto-detect)'
+        default=None,
+        help='Source language code (defaults to config.yaml or auto-detect)'
     )
     batch_parser.add_argument(
         '-t', '--target',
-        default='zh-CN',
-        help='Target language code (default: zh-CN)'
+        default=None,
+        help='Target language code (defaults to config.yaml or zh-CN)'
     )
     batch_parser.add_argument(
         '--extensions',
@@ -151,8 +151,8 @@ Examples:
     batch_parser.add_argument(
         '--delay',
         type=float,
-        default=0.5,
-        help='Delay between API requests in seconds (default: 0.5)'
+        default=None,
+        help='Delay between API requests in seconds (defaults to config.yaml)'
     )
     batch_parser.add_argument(
         '--no-backup',
@@ -193,16 +193,7 @@ def cmd_translate(args):
         print(f"Error: Input file not found: {args.input}")
         return 1
     
-    # Create translator
-    translator = GameTranslator(
-        engine=args.engine,
-        source_lang=args.source,
-        target_lang=args.target,
-        delay=args.delay,
-        batch_size=args.batch_size,
-        output_dir=args.output_dir,
-        backup=not args.no_backup
-    )
+    translator = _create_translator(args, include_batch_size=True)
     
     # Translate
     try:
@@ -231,34 +222,26 @@ def cmd_batch(args):
     # Determine recursive mode
     recursive = not args.no_recursive if args.no_recursive else args.recursive
     
-    # Create translator
-    translator = GameTranslator(
-        engine=args.engine,
-        source_lang=args.source,
-        target_lang=args.target,
-        delay=args.delay,
-        output_dir=args.output_dir or './output',
-        backup=not args.no_backup
-    )
+    translator = _create_translator(args)
     
     # Batch translate
     try:
         output_paths = translator.translate_directory(
             args.directory,
-            args.output_dir,
+            args.output_dir or translator.output_dir,
             extensions=args.extensions,
             recursive=recursive
         )
         
         print(f"\n{'='*60}")
-        print(f"✓ Batch translation completed")
+        print("[OK] Batch translation completed")
         print(f"  Total files processed: {len(output_paths)}")
         print(f"{'='*60}")
         
         return 0
         
     except Exception as e:
-        print(f"\n✗ Batch translation failed: {e}")
+        print(f"\n[ERROR] Batch translation failed: {e}")
         import traceback
         traceback.print_exc()
         return 1
@@ -311,6 +294,25 @@ def cmd_info(args):
     return 0
 
 
+def _create_translator(args, include_batch_size: bool = False) -> GameTranslator:
+    """Build a translator from config.yaml, .env, and explicit CLI overrides."""
+    config = load_config()
+    options = {
+        'config': config,
+        'engine': args.engine,
+        'source_lang': args.source,
+        'target_lang': args.target,
+        'backup': not args.no_backup,
+    }
+    if args.delay is not None:
+        options['delay'] = args.delay
+    if getattr(args, 'output_dir', None) is not None:
+        options['output_dir'] = args.output_dir
+    if include_batch_size and args.batch_size is not None:
+        options['batch_size'] = args.batch_size
+    return GameTranslator(**options)
+
+
 def cmd_config(args):
     """Handle config command."""
     
@@ -326,10 +328,13 @@ def cmd_config(args):
         )
         
         if os.path.exists(template):
-            shutil.copy(template, config_file)
-            print(f"✓ Configuration file created: {config_file}")
+            if os.path.abspath(template) == os.path.abspath(config_file):
+                print(f"[OK] Configuration file already exists: {config_file}")
+            else:
+                shutil.copy(template, config_file)
+                print(f"[OK] Configuration file created: {config_file}")
         else:
-            print(f"✗ Template not found: {template}")
+            print(f"[ERROR] Template not found: {template}")
             return 1
     
     elif args.show:

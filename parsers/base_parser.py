@@ -85,13 +85,25 @@ class BaseParser(ABC):
         pass
     
     def get_backup_path(self, output_dir: str = None) -> str:
-        """Generate backup file path."""
+        """Generate a non-destructive backup file path.
+
+        The first backup has the stable ``.backup`` name and remains the
+        original source. Later saves get a timestamped sibling instead of
+        overwriting that original snapshot.
+        """
+        from datetime import datetime
+
         if output_dir is None:
             output_dir = os.path.dirname(self.file_path)
         
         base_name = os.path.basename(self.file_path)
         name, ext = os.path.splitext(base_name)
-        return os.path.join(output_dir, f"{name}.backup{ext}")
+        primary_path = os.path.join(output_dir, f"{name}.backup{ext}")
+        if not os.path.exists(primary_path):
+            return primary_path
+
+        stamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
+        return os.path.join(output_dir, f"{name}.backup_{stamp}{ext}")
     
     def create_backup(self, backup_path: str = None) -> str:
         """Create backup of original file."""

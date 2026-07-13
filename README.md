@@ -6,11 +6,9 @@ RPG游戏翻译工具 - 支持提取、翻译和替换RPG游戏中的文本
 
 ### 🎮 支持的引擎
 - **RPG Maker MV/MZ** - 完整支持
-- **RPG Maker VX Ace** - 基础支持
-- **Wolf RPG Editor** - 基础支持
-- **Unity** - 通用支持
-- **Ren'Py** - 基础支持
-- **通用格式** - JSON/CSV/TXT/XML/YAML/Excel
+- **Unity** - 支持其中可识别的通用数据文件
+- **RPG Maker VX Ace / Wolf RPG Editor / Ren'Py** - 可检测，但专用解析与写回尚未实现
+- **通用格式** - JSON/CSV/TSV/XML/YAML/XLSX
 
 ### 🔄 翻译引擎
 - **Google翻译** - 免费，支持多语言
@@ -128,7 +126,7 @@ rpg_translator/
 │   ├── xml_parser.py            # XML
 │   ├── yaml_parser.py           # YAML
 │   ├── excel_parser.py          # Excel
-│   └── binary_parser.py         # 自定义二进制
+│   └── binary_parser.py         # 自定义二进制（未在默认格式表注册）
 │
 ├── translators/                  # 翻译引擎
 │   ├── google_translator.py     # Google翻译
@@ -146,9 +144,7 @@ rpg_translator/
 ├── analyze.py                   # 二进制分析工具
 ├── config.yaml                  # 配置文件
 ├── requirements.txt             # 依赖列表
-└── test_data/                   # 测试数据
-    ├── dialogue.json
-    └── items.csv
+└── tests/                       # 离线回归测试
 ```
 
 ## 🔧 配置说明
@@ -177,6 +173,18 @@ processing:
     - "\\{[^}]+\\}"           # {变量}
     - "<[^>]+>"                # <标签>
 ```
+
+### RPG Maker 文本提取
+```yaml
+extraction:
+  rpgmv:
+    # 仅抽取玩家可见的事件命令；可按游戏需要增删事件码
+    command_codes: [101, 102, 401, 405, 320, 324, 325]
+    # note 常用于插件标签和元数据，默认不翻译
+    include_notes: false
+```
+
+界面中将鼠标悬停在文本的 Key 或原文上，可查看事件类型和稳定路径上下文。
 
 ### 输出设置
 ```yaml
@@ -313,6 +321,6 @@ MIT License - 详见 LICENSE 文件
 
 ---
 
-**提示**: 首次使用前建议先用 `test_data` 中的示例文件测试翻译流程！
+**提示**: 首次使用前建议在副本目录中运行，并执行 `python -m pytest -q` 验证本地环境。
 
 **问题反馈**: 遇到问题请在GitHub提交Issue，包含错误日志和复现步骤。

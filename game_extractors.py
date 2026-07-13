@@ -196,7 +196,7 @@ def detect_game_engine(game_path: Path) -> Optional[Dict[str, Any]]:
         }
     
     # Check for general text files (respect ignore rules)
-    for pattern in ("*.json", "*.csv", "*.txt"):
+    for pattern in ("*.json", "*.csv", "*.xml", "*.yaml", "*.yml"):
         for file_path in game_path.rglob(pattern):
             if file_path.is_file() and not is_irrelevant_text_file(file_path, game_path):
                 return {
@@ -324,7 +324,6 @@ def extract_generic_text(game_path: Path, engine_info: Dict) -> List[Dict[str, A
     scan_targets = [
         ('*.json', 'JSON Data'),
         ('*.csv', 'CSV Data'),
-        ('*.txt', 'Text File'),
         ('*.xml', 'XML Data'),
         ('*.yaml', 'YAML Data'),
         ('*.yml', 'YAML Data'),
@@ -892,10 +891,22 @@ def save_translated_file(original_path: Path, translated_data: Dict, output_path
     for key, translated_value in rpgm_command_updates:
         _apply_rpgm_command_translation(original_data, key, translated_value)
     
-    # Save with backup
-    backup_path = original_path.with_suffix(f".backup_{int(time.time())}.json")
-    original_path.rename(backup_path)
-    
+    # Keep the original in place and create a separate, collision-safe backup.
+    # Renaming here used to remove the source file when output_path differed.
+    import shutil
+    from datetime import datetime
+
+    primary_backup = original_path.with_name(f"{original_path.stem}.backup{original_path.suffix}")
+    if primary_backup.exists():
+        stamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
+        backup_path = original_path.with_name(
+            f"{original_path.stem}.backup_{stamp}{original_path.suffix}"
+        )
+    else:
+        backup_path = primary_backup
+    shutil.copy2(original_path, backup_path)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(original_data, f, ensure_ascii=False, indent=2)
     

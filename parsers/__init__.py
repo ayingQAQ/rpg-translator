@@ -23,7 +23,6 @@ PARSERS = {
     '.yaml': YAMLParser,
     '.yml': YAMLParser,
     '.xlsx': ExcelParser,
-    '.xls': ExcelParser,
     # Binary formats can be added here
     # '.dat': BinaryParser,
 }

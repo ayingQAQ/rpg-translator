@@ -35,14 +35,14 @@ import threading
 
 # Import project modules
 try:
-    from core.translator import GameTranslator  # type: ignore
+    from core import GameTranslator, load_config  # type: ignore
     from parsers import get_supported_formats, BaseParser  # type: ignore
     from translators import get_available_engines  # type: ignore
     from game_extractors import detect_game_engine, extract_game_text, convert_to_translation_format, save_translated_file  # type: ignore
 except ImportError:
     # Direct execution
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from core.translator import GameTranslator  # type: ignore
+    from core import GameTranslator, load_config  # type: ignore
     from parsers import get_supported_formats, BaseParser  # type: ignore
     from translators import get_available_engines  # type: ignore
     from game_extractors import detect_game_engine, extract_game_text, convert_to_translation_format, save_translated_file  # type: ignore
@@ -57,11 +57,12 @@ class TranslationThread(QThread):
     finished = pyqtSignal(bool, str)  # success, message
     error = pyqtSignal(str)
     
-    def __init__(self, translator, input_path, output_path=None):
+    def __init__(self, translator, input_path, output_path=None, parser_options=None):
         super().__init__()
         self.translator = translator
         self.input_path = input_path
         self.output_path = output_path
+        self.parser_options = parser_options or {}
         self._stop_requested = False
     
     def run(self):
@@ -81,7 +82,11 @@ class TranslationThread(QThread):
             self.translator.set_log_callback(log_callback)
             
             # Perform translation
-            output = self.translator.translate_file(self.input_path, self.output_path)
+            output = self.translator.translate_file(
+                self.input_path,
+                self.output_path,
+                **self.parser_options,
+            )
             
             if self._stop_requested:
                 self.finished.emit(False, "Translation cancelled")
@@ -104,12 +109,13 @@ class OneClickTranslateThread(QThread):
     finished = pyqtSignal(bool, str)  # success, message
     error = pyqtSignal(str)
 
-    def __init__(self, game_path, engine, source_lang, target_lang, delay=0.1):
+    def __init__(self, game_path, engine, source_lang, target_lang, config=None, delay=None):
         super().__init__()
         self.game_path = game_path
         self.engine = engine
         self.source_lang = source_lang
         self.target_lang = target_lang
+        self.config = config or {}
         self.delay = delay
         self.translator = None
         self._stop_requested = False
@@ -119,11 +125,16 @@ class OneClickTranslateThread(QThread):
         try:
             self.log_message.emit('Starting one-click translation workflow...')
 
-            gt = GameTranslator(
+            translator_options = dict(
                 engine=self.engine,
                 source_lang=self.source_lang,
                 target_lang=self.target_lang,
-                delay=self.delay,
+                config=self.config,
+            )
+            if self.delay is not None:
+                translator_options['delay'] = self.delay
+            gt = GameTranslator(
+                **translator_options,
             )
             self.translator = gt
 
@@ -209,7 +220,15 @@ class OneClickTranslateThread(QThread):
 
                 self.log_message.emit(f'[{idx}/{total_files}] Translating: {input_file.name}')
                 try:
-                    result_path = gt.translate_file(str(input_file), str(input_file))
+                    parser_options = {}
+                    if engine_name == 'rpgmv':
+                        rpg_config = self.config.get('extraction', {}).get('rpgmv', {})
+                        parser_options = {
+                            'rpg_safe': True,
+                            'rpg_command_codes': rpg_config.get('command_codes'),
+                            'include_rpg_notes': rpg_config.get('include_notes', False),
+                        }
+                    result_path = gt.translate_file(str(input_file), str(input_file), **parser_options)
                     output_paths.append(result_path)
                 except Exception as file_error:
                     failed_count += 1
@@ -255,35 +274,43 @@ class RestoreThread(QThread):
         try:
             self.log_message.emit("开始扫描备份文件...")
             
-            # 查找所有包含 .backup 的文件
+            # Find all backups and restore exactly one source snapshot per file.
             backup_files = []
-            for ext in ['*.json', '*.csv', '*.txt', '*.yaml', '*.xml', '*.rpy']:
-                for file in self.game_path.rglob(ext):
-                    if self._stop_requested:
-                        self.finished.emit(False, "恢复已取消。")
-                        return
-                    if '.backup' in file.name:
-                        backup_files.append(file)
+            for file in self.game_path.rglob('*'):
+                if self._stop_requested:
+                    self.finished.emit(False, "恢复已取消。")
+                    return
+                if file.is_file() and '.backup' in file.name:
+                    backup_files.append(file)
             
             if not backup_files:
                 self.finished.emit(False, "未在目录中找到任何备份文件。")
                 return
 
-            total = len(backup_files)
+            backups_by_original = {}
+            for backup_path in backup_files:
+                original_name = re.sub(r'\.backup(_\d+)?', '', backup_path.name)
+                original_path = backup_path.parent / original_name
+                backups_by_original.setdefault(original_path, []).append(backup_path)
+
+            total = len(backups_by_original)
             restored_count = 0
             
-            for i, backup_path in enumerate(backup_files):
+            for i, (original_path, candidates) in enumerate(backups_by_original.items()):
                 if self._stop_requested:
                     self.finished.emit(False, "恢复已取消。")
                     return
-                # 利用正则还原真实文件名
-                # 兼容 "name.backup.json" 和 "name.backup_123456.json" 两种命名方式
-                original_name = re.sub(r'\.backup(_\d+)?', '', backup_path.name)
-                original_path = backup_path.parent / original_name
-                
-                # 覆盖回原文件（保留备份文件作为后悔药）
+                # Prefer the stable first backup, which is the original source.
+                # If it does not exist, use the oldest timestamped backup.
+                candidates.sort(
+                    key=lambda path: (
+                        0 if '.backup.' in path.name else 1,
+                        path.stat().st_mtime,
+                    )
+                )
+                backup_path = candidates[0]
                 shutil.copy2(backup_path, original_path)
-                self.log_message.emit(f"已恢复: {original_name}")
+                self.log_message.emit(f"已恢复: {original_path.name}")
                 
                 restored_count += 1
                 self.progress.emit(i + 1, total)
@@ -383,11 +410,16 @@ class TextTableWidget(QTableWidget):
             # Key
             key_item = QTableWidgetItem(item.get('key', ''))
             key_item.setFlags(key_item.flags() & ~Qt.ItemIsEditable)  # type: ignore
+            context = item.get('context', '')
+            if context:
+                key_item.setToolTip(context)
             self.setItem(row, 0, key_item)
             
             # Original text
             orig_item = QTableWidgetItem(item.get('original', ''))
             orig_item.setFlags(orig_item.flags() & ~Qt.ItemIsEditable)  # type: ignore
+            if context:
+                orig_item.setToolTip(context)
             self.setItem(row, 1, orig_item)
             
             # Translated text (editable)
@@ -404,6 +436,8 @@ class TextTableWidget(QTableWidget):
                 status_item.setBackground(QColor(200, 255, 200))  # Light green
             elif status == 'pending':
                 status_item.setBackground(QColor(255, 255, 200))  # Light yellow
+            elif status == 'review':
+                status_item.setBackground(QColor(255, 225, 170))  # Light orange
             elif status == 'error':
                 status_item.setBackground(QColor(255, 200, 200))  # Light red
             
@@ -437,12 +471,18 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
         self.setMinimumSize(1080, 720)
         self.settings = QSettings("RPGTranslator", "RPG Game Translator")
+        try:
+            self.app_config = load_config()
+        except ValueError as exc:
+            self.app_config = {}
+            print(f"Configuration ignored: {exc}")
         
         # Initialize data
         self.current_project: Optional[Any] = None
         self.text_data: List[Dict[str, Any]] = []
         self.game_path: Optional[Path] = None
         self.current_file: Optional[Path] = None
+        self.current_parser: Optional[BaseParser] = None
         self.main_splitter: Optional[QSplitter] = None
         self.last_open_dir = str(self.settings.value("last_game_dir", "", type=str))
         self.translator_thread: Optional[TranslationThread] = None
@@ -1184,7 +1224,7 @@ class MainWindow(QMainWindow):
         if game_path is None:
             return
         oc_thread = OneClickTranslateThread(
-            game_path, engine, source_lang, target_lang
+            game_path, engine, source_lang, target_lang, config=self.app_config
         )
         self.one_click_thread = oc_thread
         oc_thread.progress.connect(self.update_progress)
@@ -1270,7 +1310,8 @@ class MainWindow(QMainWindow):
             # Use Parser system instead of manual JSON loading
             from parsers import get_parser  # type: ignore
             
-            parser = get_parser(str(file_path))
+            parser_options = self._parser_options_for_file(file_info)
+            parser = get_parser(str(file_path), **parser_options)
             segments = parser.parse()
             
             self.text_data = []
@@ -1279,7 +1320,12 @@ class MainWindow(QMainWindow):
                     'key': segment.location,  # Use precise location as key!
                     'original': segment.text,
                     'translated': segment.translated_text or '',
-                    'status': 'pending' if not segment.translated_text else 'translated'
+                    'status': (
+                        'review' if segment.metadata and segment.metadata.get('decision') == 'review'
+                        else ('pending' if not segment.translated_text else 'translated')
+                    ),
+                    'context': segment.context,
+                    'metadata': segment.metadata,
                 })
             
             self.current_file = file_path
@@ -1298,6 +1344,32 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
         
         self.update_ui_state()
+
+    def _parser_options_for_file(self, file_info: Any) -> Dict[str, Any]:
+        """Return the extraction profile for a listed game data file."""
+        if not isinstance(file_info, dict) or file_info.get('engine') != 'rpgmv':
+            return {}
+
+        extraction_config = self.app_config.get('extraction', {})
+        rpg_config = extraction_config.get('rpgmv', {}) if isinstance(extraction_config, dict) else {}
+        if not isinstance(rpg_config, dict):
+            rpg_config = {}
+        return {
+            'rpg_safe': True,
+            'rpg_command_codes': rpg_config.get('command_codes'),
+            'include_rpg_notes': rpg_config.get('include_notes', False),
+        }
+
+    def _current_file_info(self) -> Dict[str, Any]:
+        """Find the engine metadata associated with the file currently open."""
+        if self.current_file is None:
+            return {}
+        for index in range(self.files_list.count()):
+            item = self.files_list.item(index)
+            file_info = item.data(Qt.UserRole)  # type: ignore
+            if isinstance(file_info, dict) and file_info.get('path') == self.current_file:
+                return file_info
+        return {}
     
     def translate_all(self):
         """Translate all text."""
@@ -1316,7 +1388,7 @@ class MainWindow(QMainWindow):
             engine=engine,
             source_lang=source_lang,
             target_lang=target_lang,
-            delay=0.2
+            config=self.app_config,
         )
         
         # Create and start translation thread
@@ -1326,7 +1398,8 @@ class MainWindow(QMainWindow):
         tr_thread = TranslationThread(
             translator,
             str(current_file),
-            str(current_file.parent / f"{current_file.stem}_{target_lang}.json")
+            str(current_file.parent / f"{current_file.stem}_{target_lang}{current_file.suffix}"),
+            parser_options=self._parser_options_for_file(self._current_file_info()),
         )
         self.translator_thread = tr_thread
         tr_thread.progress.connect(self.update_progress)
@@ -1351,7 +1424,7 @@ class MainWindow(QMainWindow):
             engine=engine,
             source_lang=source_lang,
             target_lang=target_lang,
-            delay=0.2
+            config=self.app_config,
         )
         
         # Translate selected rows
@@ -1461,9 +1534,13 @@ class MainWindow(QMainWindow):
             return
         start_dir = self.last_open_dir if self.last_open_dir and Path(self.last_open_dir).exists() else ""
         
+        current_file = self.current_file
+        if current_file is None:
+            QMessageBox.warning(self, "Warning", "No source file loaded.")
+            return
         file_name, _ = QFileDialog.getSaveFileName(
             self, "Save Translation File", start_dir,
-            "JSON Files (*.json);;All Files (*.*)"
+            f"{current_file.suffix.upper()} Files (*{current_file.suffix});;All Files (*.*)"
         )
         
         if file_name:
@@ -1471,34 +1548,24 @@ class MainWindow(QMainWindow):
                 # Get current data from table
                 self.text_data = self.text_table.get_text_data()
                 
-                # Convert from table format to translation format
-                translated_data = {}
-                for item in self.text_data:
-                    translated_data[item['key']] = item['translated'] or item['original']
-                
-                # For "Save As", we need the original file to preserve structure
                 current_file = self.current_file
-                if current_file is None:
+                parser = self.current_parser
+                if current_file is None or parser is None:
                     QMessageBox.warning(self, "Warning", "No source file loaded.")
                     return
-                from game_extractors import detect_file_encoding  # type: ignore
-                encoding = detect_file_encoding(current_file)
-
-                with open(current_file, 'r', encoding=encoding) as f:
-                    original_data = json.load(f)  # noqa: F841
-
-                # Apply translations to original structure
-                # This ensures we maintain the proper nested format
                 output_path = Path(file_name)
-                backup_path = save_translated_file(
-                    current_file,
-                    translated_data,
-                    output_path=output_path
-                )
+                from parsers.base_parser import TextSegment  # type: ignore
+                segments = [
+                    TextSegment(
+                        text=item['original'],
+                        location=item['key'],
+                        translated_text=item['translated'] or item['original'],
+                    )
+                    for item in self.text_data
+                ]
+                parser.save(parser.reconstruct(segments), str(output_path))
                 
                 self.log(f"File saved as: {file_name}")
-                if backup_path:
-                    self.log(f"Original backup created: {backup_path}")
                 QMessageBox.information(self, "Success", f"File saved successfully!\n{file_name}")
                 
             except Exception as e:

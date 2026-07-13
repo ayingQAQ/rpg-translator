@@ -153,9 +153,9 @@ delay = 0.1  # 多线程下可更低，单线程需要0.5以上
 
 已测试支持的游戏引擎：
 - RPG Maker MV/MZ（JSON格式）
-- RPG Maker VX Ace（Ruby脚本）
-- Unity（TextAsset）
-- Ren'Py（脚本文件）
+- Unity 中的 JSON/CSV/XML/YAML 等通用数据文件
+
+RPG Maker VX Ace、Wolf RPG Editor 与 Ren'Py 目前可被识别，但尚未提供可安全写回的专用解析器；请勿将“一键汉化”用于这些格式。
 
 如遇到不支持的游戏格式，欢迎反馈！
 

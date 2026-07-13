@@ -7,6 +7,7 @@ import sys
 import json
 import time
 import concurrent.futures
+import threading
 from typing import List, Dict, Any, Optional, Tuple, Callable
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,10 @@ except ImportError:
     )
 
 
+class TranslationCancelled(Exception):
+    """Raised before reconstruction when a caller cancels a translation."""
+
+
 class GameTranslator:
     """
     Main class for translating RPG game text files.
@@ -45,9 +50,9 @@ class GameTranslator:
     
     def __init__(
         self,
-        engine: str = 'google',
-        source_lang: str = 'auto',
-        target_lang: str = 'zh-CN',
+        engine: Optional[str] = None,
+        source_lang: Optional[str] = None,
+        target_lang: Optional[str] = None,
         config: Optional[Dict] = None,
         **kwargs
     ):
@@ -62,27 +67,54 @@ class GameTranslator:
             **kwargs: Additional options
         """
         self.config = config or {}
-        self.engine_name = engine
-        self.source_lang = source_lang
-        self.target_lang = target_lang
+        translation_config = self.config.get('translation', {})
+        processing_config = self.config.get('processing', {})
+        output_config = self.config.get('output', {})
+        api_config = self.config.get('apis', {})
+        local_model_config = self.config.get('local_model', {})
+
+        if not all(isinstance(value, dict) for value in (
+            translation_config, processing_config, output_config, api_config, local_model_config
+        )):
+            raise ValueError('Configuration sections must be mappings.')
+
+        self.engine_name = engine or str(translation_config.get('engine', 'google'))
+        self.source_lang = source_lang or str(translation_config.get('source_lang', 'auto'))
+        self.target_lang = target_lang or str(translation_config.get('target_lang', 'zh-CN'))
         
         # Translation settings
-        self.batch_size: int = kwargs.get('batch_size', 50)
-        self.delay: float = kwargs.get('delay', 0.5)
-        self.preserve_patterns: List[str] = list(kwargs.get('preserve_patterns', []))
-        self.skip_patterns: List[str] = list(kwargs.get('skip_patterns', []))
+        self.batch_size: int = int(kwargs.get('batch_size', translation_config.get('batch_size', 50)))
+        self.delay: float = float(kwargs.get('delay', translation_config.get('delay_between_requests', 0.5)))
+        self.max_workers: int = max(1, int(kwargs.get('max_workers', translation_config.get('max_workers', 5))))
+        self.min_text_length: int = max(0, int(processing_config.get('min_text_length', 0)))
+        self.max_text_length: int = max(1, int(processing_config.get('max_text_length', 5000)))
+        self.preserve_patterns: List[str] = list(kwargs.get('preserve_patterns', processing_config.get('preserve_patterns', [])))
+        self.skip_patterns: List[str] = list(kwargs.get('skip_patterns', processing_config.get('skip_patterns', [])))
         
         # Output settings
-        self.output_dir = kwargs.get('output_dir', './output')
-        self.create_backup = kwargs.get('backup', True)
-        self.log_file = kwargs.get('log_file', 'translation_log.json')
+        self.output_dir = kwargs.get('output_dir', output_config.get('directory', './output'))
+        self.create_backup = kwargs.get('backup', output_config.get('backup', True))
+        self.log_file = kwargs.get('log_file', output_config.get('log_file', 'translation_log.json'))
+
+        translator_options: Dict[str, Any] = {}
+        engine_api_config = api_config.get(self.engine_name, {})
+        if isinstance(engine_api_config, dict):
+            translator_options.update(engine_api_config)
+        if self.engine_name == 'local':
+            translator_options.update(local_model_config)
+        translator_options.update(kwargs)
+        translator_options.update({
+            'source_lang': self.source_lang,
+            'target_lang': self.target_lang,
+            'delay': self.delay,
+            'max_retries': int(kwargs.get('max_retries', translation_config.get('max_retries', 3))),
+            'retry_delay': float(kwargs.get('retry_delay', translation_config.get('retry_delay', 2.0))),
+        })
         
         # Initialize translator
         self.translator = get_translator(
-            engine,
-            source_lang=source_lang,
-            target_lang=target_lang,
-            **kwargs
+            self.engine_name,
+            **translator_options
         )
         
         # Translation statistics
@@ -97,6 +129,9 @@ class GameTranslator:
         
         # Translation log
         self.translation_log = []
+        self._translation_cache: Dict[str, str] = {}
+        self._cache_lock = threading.Lock()
+        self._cancelled = False
         
         # Progress callback
         self.progress_callback: Optional[Callable[[int, int], bool]] = None
@@ -149,6 +184,9 @@ class GameTranslator:
         print(f"Translating: {input_path}")
         print(f"{'='*60}")
         
+        # Each file has an independent summary and audit log.
+        self._reset_file_state()
+
         # Start timer
         self.stats['start_time'] = datetime.now()
         
@@ -248,6 +286,8 @@ class GameTranslator:
                 )
                 output_paths.append(result_path)
                 
+            except TranslationCancelled:
+                raise
             except Exception as e:
                 print(f"  Error: {e}")
                 continue
@@ -265,7 +305,6 @@ class GameTranslator:
             List of TextSegment objects with translated_text populated
         """
         from tqdm import tqdm  # type: ignore
-        import threading
         
         translated = []
         failed = []
@@ -283,6 +322,22 @@ class GameTranslator:
                 segment.translated_text = segment.text
                 with lock:
                     completed[0] += 1
+                return segment, None
+
+            # Review candidates remain visible in the editor but are excluded
+            # from one-click translation until a user explicitly confirms them.
+            if segment.metadata and segment.metadata.get('decision') == 'review':
+                segment.translated_text = segment.text
+                with lock:
+                    self.stats['skipped_texts'] += 1
+                    completed[0] += 1
+                    self.translation_log.append({
+                        'original': segment.text,
+                        'translated': segment.text,
+                        'location': segment.location,
+                        'success': True,
+                        'status': 'review',
+                    })
                 return segment, None
             
             # Check if should skip
@@ -305,9 +360,15 @@ class GameTranslator:
             # Preserve placeholders
             preserved_text, placeholder_map = self._preserve_placeholders(segment.text)
             
-            # Translate
+            # Translate. Repeated strings are common in RPG data; cache within a
+            # run to avoid duplicate API calls and keep terminology consistent.
             try:
-                translated_text = self.translator.translate_with_retry(preserved_text)
+                with self._cache_lock:
+                    translated_text = self._translation_cache.get(preserved_text)
+                if translated_text is None:
+                    translated_text = self.translator.translate_with_retry(preserved_text)
+                    with self._cache_lock:
+                        self._translation_cache[preserved_text] = translated_text
                 
                 # Restore placeholders
                 translated_text = self._restore_placeholders(translated_text, placeholder_map)
@@ -351,7 +412,7 @@ class GameTranslator:
         # 🚀 使用线程池，同时发起多个翻译请求
         # 免费 Google 接口开太大容易被封 IP，5-10 比较安全
         # 如果是付费API如DeepL可以开到20-50
-        max_workers = 10
+        max_workers = self.max_workers
         
         # Create progress display (优雅降级处理)
         use_pbar = not self.progress_callback
@@ -389,6 +450,7 @@ class GameTranslator:
                     should_continue = cb(current_completed, total)
                     if not should_continue:
                         print("Translation cancelled by user.")
+                        self._cancelled = True
                         # Cancel remaining futures
                         for f in future_to_segment:
                             f.cancel()
@@ -401,6 +463,10 @@ class GameTranslator:
       # 直接把多余的嵌套 if 去掉，并保持正确的缩进
         if pbar is not None:
             pbar.close()  # type: ignore
+
+        if self._cancelled:
+            # Do not reconstruct or write a partial translation after a cancel.
+            raise TranslationCancelled('Translation cancelled before saving output.')
         
         # Report failures
         if failed:
@@ -413,6 +479,19 @@ class GameTranslator:
                 print(f"    ... and {len(failed) - 5} more")
         
         return translated
+
+    def _reset_file_state(self) -> None:
+        """Reset per-file state while preserving the reusable translation cache."""
+        self.stats = {
+            'total_texts': 0,
+            'translated_texts': 0,
+            'skipped_texts': 0,
+            'failed_texts': 0,
+            'start_time': None,
+            'end_time': None,
+        }
+        self.translation_log = []
+        self._cancelled = False
 
     def translate(self, text: str) -> str:
         """Translate a single string."""
@@ -431,6 +510,10 @@ class GameTranslator:
         import re
         
         if not text or not text.strip():
+            return True
+
+        normalized_text = text.strip()
+        if len(normalized_text) < self.min_text_length or len(normalized_text) > self.max_text_length:
             return True
         
         for pattern in self.skip_patterns:

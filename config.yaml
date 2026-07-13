@@ -12,6 +12,7 @@ translation:
   
   # Batch settings
   batch_size: 50  # Texts per batch
+  max_workers: 5  # Concurrent requests; raise only if the provider allows it
   delay_between_requests: 0.5  # Seconds between API calls
   
   # Retry settings
@@ -47,13 +48,19 @@ processing:
   skip_patterns:
     - "^[0-9]+$"  # Pure numbers
     - "^[a-zA-Z0-9_]+$"  # Variable names
-    - "^[\\s\\p{P}]+$"  # Only whitespace/punctuation
+    - "^[\\s\\W_]+$"  # Only whitespace/punctuation
   
   # Preserve patterns (don't translate content within)
   preserve_patterns:
     - "\\{[^}]+\\}"  # {variables}
     - "<[^>]+>"      # <tags>
     - "\\[[^]]+\\]"  # [placeholders]
+
+# Extraction rules keep engine metadata and resource filenames out of translation.
+extraction:
+  rpgmv:
+    command_codes: [101, 102, 401, 405, 320, 324, 325]
+    include_notes: false  # RPG Maker notes commonly store plugin metadata
 
 # Output Settings
 output:
